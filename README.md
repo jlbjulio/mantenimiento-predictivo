@@ -4,6 +4,8 @@
 
 Herramienta que analiza parámetros operativos de máquinas para predecir fallos y sugerir acciones preventivas con justificación basada en modelos y reglas físicas.
 
+https://mantenimiento-predictivo.streamlit.app/
+
 ## Características
 
 - Predicción de fallo global y modos (TWF, HDF, PWF, OSF, RNF)
