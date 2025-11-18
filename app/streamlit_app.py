@@ -323,6 +323,26 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
         _write(pd.Timestamp.utcnow())
     
 
+def remove_prediction_entry(timestamp: pd.Timestamp | str):
+    """Remove an existing prediction row from predicciones.csv by timestamp (±1s tolerance)."""
+    try:
+        if not os.path.exists(PRED_LOG):
+            return False
+        df = pd.read_csv(PRED_LOG)
+        if 'timestamp' not in df.columns or df.empty:
+            return False
+        ts_target = pd.to_datetime(timestamp, utc=True, errors='coerce')
+        ts_existing = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+        mask_keep = ~((ts_existing == ts_target) | ((ts_existing - ts_target).abs() <= pd.Timedelta(seconds=1)))
+        # If no rows removed, return
+        if mask_keep.all():
+            return False
+        df_new = df.loc[mask_keep].copy()
+        df_new.to_csv(PRED_LOG, index=False)
+        return True
+    except Exception:
+        return False
+
 
 def ensure_pred_log_has_history(model, count: int = 500):
     """Seed predicciones.csv with entries from base dataset to create initial history.
@@ -776,13 +796,22 @@ def main():
             # Notes input removed by user request: notes are no longer accepted separately; only feedback via the two buttons is recorded.
             # Clear last prediction to avoid duplicate logging
             if st.button('Borrar predicción actual', key='clear_pred'):
+                removed = False
                 try:
+                    # Attempt to remove the already-logged row (if any)
+                    pred_stored = st.session_state.get('last_prediction_data')
+                    ts = pred_stored.get('prediction_timestamp') if pred_stored else None
+                    if ts is not None:
+                        removed = remove_prediction_entry(ts)
+                    # Clear session state and suppress any further logging on rerun
                     st.session_state.last_prediction_data = None
-                    # Suppress any accidental logging on rerun after clearing
                     st.session_state.suppress_logging = True
                 except Exception:
                     pass
-                st.info('Predicción actual borrada. No se registrará cuando se haga feedback.')
+                if removed:
+                    st.success('🗑️ Predicción eliminada del histórico. No se registrará feedback para esta instancia.')
+                else:
+                    st.info('Predicción actual borrada de la sesión. No se registrará cuando se haga feedback.')
 
 
 
