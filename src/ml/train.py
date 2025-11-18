@@ -257,7 +257,7 @@ def main():
     
     # Configuration: delta and retention
     MODEL_REPLACEMENT_DELTA = float(os.environ.get('AUC_REPLACEMENT_DELTA', 0.001))
-    MODEL_RETENTION_KEEP = int(os.environ.get('MODEL_RETENTION_KEEP', 5))
+    MODEL_RETENTION_KEEP = int(os.environ.get('MODEL_RETENTION_KEEP', 1))
 
     # Before training, read current production metrics to decide on replacement later
     current_production_metrics = None

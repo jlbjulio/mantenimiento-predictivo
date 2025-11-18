@@ -16,8 +16,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
-        'Get Help': 'https://github.com/TU_USUARIO/mantenimiento-predictivo',
-        'Report a bug': 'https://github.com/TU_USUARIO/mantenimiento-predictivo/issues',
+        'Get Help': 'https://github.com/jlbjulio/mantenimiento-predictivo',
+        'Report a bug': 'https://github.com/jlbjulio/mantenimiento-predictivo/issues',
         'About': '# Sistema Inteligente de Mantenimiento Predictivo\nVersion 1.0 - Nov 2025'
     }
 )
@@ -253,14 +253,8 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
         pass
     header = ['timestamp','air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob','Machine failure','feedback_timestamp']
     write_header = not os.path.exists(PRED_LOG)
-    # Ensure CSV header includes new columns; if not, upgrade existing CSV adding missing cols
+    # Ensure CSV header includes new columns; if not, add missing columns without rewriting valid data
     full_header = ['timestamp','air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob','Machine failure','feedback_timestamp']
-    # Try to upgrade/normalize existing pred file first if function available
-    if upgrade_pred_log is not None and os.path.exists(PRED_LOG):
-        try:
-            upgrade_pred_log(PRED_LOG)
-        except Exception:
-            pass
     if os.path.exists(PRED_LOG):
         try:
             with open(PRED_LOG, 'r', newline='') as f:
@@ -278,39 +272,70 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
             # best effort; ignore
             pass
     def _write(ts):
+        # Normalize timestamps to ISO seconds to avoid parse issues
+        try:
+            ts_norm = pd.to_datetime(ts, errors='coerce')
+            if pd.notna(ts_norm):
+                ts = ts_norm.strftime('%Y-%m-%dT%H:%M:%S')
+        except Exception:
+            pass
+        fb_ts = ''
+        if feedback_timestamp is not None:
+            try:
+                fb_ts_dt = pd.to_datetime(feedback_timestamp, errors='coerce')
+                if pd.notna(fb_ts_dt):
+                    fb_ts = fb_ts_dt.strftime('%Y-%m-%dT%H:%M:%S')
+                else:
+                    fb_ts = str(feedback_timestamp)
+            except Exception:
+                fb_ts = str(feedback_timestamp)
         with open(PRED_LOG, 'a', newline='') as f:
             w = csv.writer(f)
             if write_header:
                 w.writerow(header)
-            w.writerow([ts, data['air_temp_k'], data['process_temp_k'], data['rot_speed_rpm'], data['torque_nm'], data['tool_wear_min'], data['type'], pred, f"{prob:.4f}", machine_failure if machine_failure is not None else '', feedback_timestamp if feedback_timestamp else ''])
+            w.writerow([ts, data['air_temp_k'], data['process_temp_k'], data['rot_speed_rpm'], data['torque_nm'], data['tool_wear_min'], data['type'], pred, f"{prob:.4f}", machine_failure if machine_failure is not None else '', fb_ts])
     # Accept timestamp override if provided
-    # deduplicate: do not write if prediction with same timestamp already exists
+    # deduplicate/update: if a row with the same prediction timestamp (string exact) already exists, update it
     try:
         if os.path.exists(PRED_LOG):
             existing = pd.read_csv(PRED_LOG)
-            if 'timestamp' in existing.columns:
+            if 'timestamp' in existing.columns and not existing.empty:
                 try:
-                    # Normalize provided timestamp and existing timestamps to UTC to compare robustly
-                    provided_ts = pd.to_datetime(data.get('prediction_timestamp'), utc=True)
-                    existing_ts = pd.to_datetime(existing['timestamp'], utc=True, errors='coerce')
-                    # Accept match if timestamps are exactly equal OR within 1 second delta (to handle formatting/rounding differences)
-                    delta = (existing_ts - provided_ts).abs()
-                    mask = (existing_ts == provided_ts) | (delta <= pd.Timedelta(seconds=1))
-                    matches = existing[mask]
-                    if len(matches) > 0:
-                        # Update the existing row: add machine_failure and feedback_timestamp if provided
-                        idx = matches.index
-                        existing.loc[idx, 'Machine failure'] = machine_failure if machine_failure is not None else existing.loc[idx, 'Machine failure']
-                        # Ensure textual columns are object dtype to avoid dtype warnings
-                        for _c in ['feedback_timestamp']:
-                            if _c in existing.columns:
-                                try:
-                                    existing[_c] = existing[_c].astype('object')
-                                except Exception:
-                                    pass
-                        # no notes column: do not write notes
+                    provided_raw = data.get('prediction_timestamp')
+                    provided_dt = pd.to_datetime(provided_raw, errors='coerce')
+                    if pd.isna(provided_dt):
+                        raise ValueError('Invalid prediction timestamp')
+                    provided_str = provided_dt.strftime('%Y-%m-%dT%H:%M:%S')
+                    # First attempt: exact string match on timestamp
+                    mask = (existing['timestamp'].astype(str) == provided_str)
+                    if not mask.any():
+                        # Fallback: match rows with empty Machine failure and identical feature values
+                        feature_cols = ['air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob']
+                        try:
+                            for col in feature_cols:
+                                if col == 'prob':
+                                    # Prob stored as string formatted to 4 decimals; compare rounding
+                                    prob_str = f"{prob:.4f}" if prob is not None else ''
+                                    mask_feat = (existing[col].astype(str) == prob_str)
+                                else:
+                                    mask_feat = (existing[col].astype(str) == str(data.get(col if col!='pred' and col!='prob' else col)))
+                                mask = mask & mask_feat if 'mask' in locals() and len(mask) == len(existing) else mask_feat
+                            # Only keep candidates with empty Machine failure
+                            if 'Machine failure' in existing.columns:
+                                mask = mask & (existing['Machine failure'].astype(str).isin(['','nan']))
+                        except Exception:
+                            pass
+                    if mask.any():
+                        idxs = existing[mask].index
+                        if machine_failure is not None:
+                            existing.loc[idxs, 'Machine failure'] = float(machine_failure)
                         if feedback_timestamp is not None:
-                            existing.loc[idx, 'feedback_timestamp'] = str(feedback_timestamp)
+                            try:
+                                fb_ts_dt = pd.to_datetime(feedback_timestamp, errors='coerce')
+                                fb_val = fb_ts_dt.strftime('%Y-%m-%dT%H:%M:%S') if pd.notna(fb_ts_dt) else str(feedback_timestamp)
+                            except Exception:
+                                fb_val = str(feedback_timestamp)
+                            existing.loc[idxs, 'feedback_timestamp'] = fb_val
                         existing.to_csv(PRED_LOG, index=False)
                         return
                 except Exception:
@@ -323,22 +348,19 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
         _write(pd.Timestamp.utcnow())
     
 
-def remove_prediction_entry(timestamp: pd.Timestamp | str):
-    """Remove an existing prediction row from predicciones.csv by timestamp (±1s tolerance)."""
+# Simple version in use; advanced removal logic removed per user request
+ 
+
+def remove_last_prediction_row() -> bool:
+    """Simplest path: delete the last row in predicciones.csv (if any)."""
     try:
         if not os.path.exists(PRED_LOG):
             return False
         df = pd.read_csv(PRED_LOG)
-        if 'timestamp' not in df.columns or df.empty:
+        if df.empty:
             return False
-        ts_target = pd.to_datetime(timestamp, utc=True, errors='coerce')
-        ts_existing = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
-        mask_keep = ~((ts_existing == ts_target) | ((ts_existing - ts_target).abs() <= pd.Timedelta(seconds=1)))
-        # If no rows removed, return
-        if mask_keep.all():
-            return False
-        df_new = df.loc[mask_keep].copy()
-        df_new.to_csv(PRED_LOG, index=False)
+        df = df.iloc[:-1].copy()
+        df.to_csv(PRED_LOG, index=False)
         return True
     except Exception:
         return False
@@ -551,11 +573,8 @@ def main():
         st.caption('Indicadores clave del instante operativo. El desgaste (%) se calcula sobre 240 min como límite superior.')
         st.markdown('<hr/>', unsafe_allow_html=True)
         if st.button('Calcular Predicción y Recomendaciones'):
-            # Reset feedback flag for new prediction
             st.session_state.feedback_given = False
-            # Enable logging for this new prediction
             st.session_state.suppress_logging = False
-            
             data = {
                 'air_temp_k': air_temp,
                 'process_temp_k': process_temp,
@@ -564,17 +583,31 @@ def main():
                 'tool_wear_min': wear,
                 'type': prod_type
             }
-            # Guardar datos en session_state para SHAP
-            st.session_state.last_prediction_data = data
             pred, prob = predict_instance(model, data)
+            now_ts = pd.Timestamp.utcnow()
+            st.session_state.last_prediction_data = {**data, 'pred': int(pred), 'prob': float(prob), 'prediction_timestamp': now_ts}
+            log_prediction(
+                data={**data, 'prediction_timestamp': now_ts},
+                prob=float(prob),
+                pred=int(pred),
+                machine_failure=None,
+                feedback_timestamp=None
+            )
+            st.rerun()
+
+        # Render resultado + acciones si hay predicción activa en sesión
+        if st.session_state.get('last_prediction_data') is not None:
+            data_view = st.session_state.get('last_prediction_data')
+            prob_v = float(data_view.get('prob', 0.0))
+            pred_v = int(data_view.get('pred', 0))
             st.subheader('Resultado de Predicción')
-            risk_label = 'ALTO' if prob>=0.6 else ('MODERADO' if prob>=0.3 else 'BAJO')
-            st.markdown(f"### Riesgo de fallo: **{risk_label}** - **{prob:.2f}**")
+            risk_label = 'ALTO' if prob_v>=0.6 else ('MODERADO' if prob_v>=0.3 else 'BAJO')
+            st.markdown(f"### Riesgo de fallo: **{risk_label}** - **{prob_v:.2f}**")
             st.markdown(f"Modelo seleccionado: **{best_model_name()}**")
 
             gauge = go.Figure(go.Indicator(
                 mode="gauge+number",
-                value=prob*100,
+                value=prob_v*100,
                 title={'text': 'Índice de Riesgo (%)'},
                 gauge={
                     'axis': {'range': [0,100]},
@@ -583,123 +616,59 @@ def main():
                         {'range':[30,60],'color':'#ffb300'},
                         {'range':[60,100],'color':'#c62828'}
                     ],
-                    'threshold': {'line': {'color': '#c62828', 'width': 4}, 'thickness': 0.75, 'value': prob*100}
+                    'threshold': {'line': {'color': '#c62828', 'width': 4}, 'thickness': 0.75, 'value': prob_v*100}
                 }
             ))
             st.plotly_chart(gauge, use_container_width=True)
 
-            delta_temp = process_temp - air_temp
-            omega = rot_speed * 2 * 3.141592653589793 / 60
-            power = torque * omega
-            
-            # Crear gráfica más grande con mejor espaciado
+            delta_temp = float(data_view['process_temp_k']) - float(data_view['air_temp_k'])
+            omega = float(data_view['rot_speed_rpm']) * 2 * 3.141592653589793 / 60
+            power = float(data_view['torque_nm']) * omega
+            wear_val = float(data_view['tool_wear_min'])
+
             fig_metrics = make_subplots(
-                rows=1, cols=3, 
-                subplot_titles=["Delta Térmico (K)", "Potencia (W)", "Desgaste Herramienta (%)"], 
+                rows=1, cols=3,
+                subplot_titles=["Delta Térmico (K)", "Potencia (W)", "Desgaste Herramienta (%)"],
                 horizontal_spacing=0.12,
                 specs=[[{"type": "bar"}, {"type": "bar"}, {"type": "bar"}]]
             )
-            
-            # Delta térmico con mejor visualización
             delta_color = '#d32f2f' if delta_temp < 9 else '#1976d2'
             fig_metrics.add_trace(go.Bar(
-                name='ΔT', 
-                x=['Delta Térmico'], 
-                y=[delta_temp], 
-                marker_color=delta_color,
-                text=[f"{delta_temp:.1f} K"], 
-                textposition='outside',
-                textfont=dict(size=16, color='black'),
-                width=0.5
+                name='ΔT', x=['Delta Térmico'], y=[delta_temp], marker_color=delta_color,
+                text=[f"{delta_temp:.1f} K"], textposition='outside', textfont=dict(size=16, color='black'), width=0.5
             ), row=1, col=1)
-            fig_metrics.add_hline(
-                y=9, 
-                line_color='red', 
-                line_width=3, 
-                line_dash='dash',
-                annotation_text='Umbral Crítico: 9K', 
-                annotation_position='top right',
-                annotation_font_size=12,
-                row=1, col=1
-            )
-            
-            # Potencia con zona segura mejorada
+            fig_metrics.add_hline(y=9, line_color='red', line_width=3, line_dash='dash',
+                                  annotation_text='Umbral Crítico: 9K', annotation_position='top right', annotation_font_size=12,
+                                  row=1, col=1)
             power_color = '#d32f2f' if (power < 3500 or power > 9000) else '#6a1b9a'
             fig_metrics.add_trace(go.Bar(
-                name='Potencia', 
-                x=['Potencia'], 
-                y=[power], 
-                marker_color=power_color,
-                text=[f"{power:.0f} W"], 
-                textposition='outside',
-                textfont=dict(size=16, color='black'),
-                width=0.5
+                name='Potencia', x=['Potencia'], y=[power], marker_color=power_color,
+                text=[f"{power:.0f} W"], textposition='outside', textfont=dict(size=16, color='black'), width=0.5
             ), row=1, col=2)
-            fig_metrics.add_hrect(
-                y0=3500, y1=9000, 
-                line_width=2, 
-                fillcolor='rgba(76,175,80,0.2)', 
-                line_color='green',
-                annotation_text='Zona Segura', 
-                annotation_position='top left',
-                annotation_font_size=12,
-                row=1, col=2
-            )
-            
-            # Desgaste con mejor escala
-            wear_pct = wear/240.0*100
-            wear_color = '#d32f2f' if wear >= 200 else ('#ff8f00' if wear >= 150 else '#00838f')
+            fig_metrics.add_hrect(y0=3500, y1=9000, line_width=2, fillcolor='rgba(76,175,80,0.2)', line_color='green',
+                                  annotation_text='Zona Segura', annotation_position='top left', annotation_font_size=12, row=1, col=2)
+            wear_pct = wear_val/240.0*100
+            wear_color = '#d32f2f' if wear_val >= 200 else ('#ff8f00' if wear_val >= 150 else '#00838f')
             fig_metrics.add_trace(go.Bar(
-                name='Desgaste', 
-                x=['Desgaste'], 
-                y=[wear_pct], 
-                marker_color=wear_color,
-                text=[f"{wear_pct:.1f}% ({wear:.0f} min)"], 
-                textposition='outside',
-                textfont=dict(size=16, color='black'),
-                width=0.5
+                name='Desgaste', x=['Desgaste'], y=[wear_pct], marker_color=wear_color,
+                text=[f"{wear_pct:.1f}% ({wear_val:.0f} min)"], textposition='outside', textfont=dict(size=16, color='black'), width=0.5
             ), row=1, col=3)
-            fig_metrics.add_hline(
-                y=200/240*100, 
-                line_color='red', 
-                line_width=3,
-                line_dash='dash',
-                annotation_text='Umbral Crítico: 200 min', 
-                annotation_position='top right',
-                annotation_font_size=12,
-                row=1, col=3
-            )
-            
-            # Actualizar layout para mejor visualización
+            fig_metrics.add_hline(y=200/240*100, line_color='red', line_width=3, line_dash='dash',
+                                  annotation_text='Umbral Crítico: 200 min', annotation_position='top right', annotation_font_size=12,
+                                  row=1, col=3)
             fig_metrics.update_yaxes(showgrid=True, gridcolor='rgba(128,128,128,0.2)')
             fig_metrics.update_xaxes(showticklabels=False)
-            fig_metrics.update_layout(
-                showlegend=False, 
-                height=500,
-                font=dict(size=14),
-                title_text="Análisis de Parámetros Críticos vs Umbrales de Seguridad",
-                title_font_size=18
-            )
+            fig_metrics.update_layout(showlegend=False, height=500, font=dict(size=14),
+                                      title_text="Análisis de Parámetros Críticos vs Umbrales de Seguridad", title_font_size=18)
             st.plotly_chart(fig_metrics, use_container_width=True)
             st.caption("""**Interpretación de colores:** 
             - **Rojo**: Parámetro en zona crítica - requiere acción inmediata
             - **Naranja**: Parámetro en zona de precaución - monitorear de cerca
             - **Azul/Morado**: Parámetro en rango operativo normal
             """)
-            # Save prediction data immediately for feedback buttons
-            now_ts = pd.Timestamp.utcnow()
-            st.session_state.last_prediction_data = {**data, 'pred': int(pred), 'prob': float(prob), 'prediction_timestamp': now_ts}
-            # Log the prediction immediately (without machine_failure yet)
-            log_prediction(
-                data={**data, 'prediction_timestamp': now_ts},
-                prob=float(prob),
-                pred=int(pred),
-                machine_failure=None,
-                feedback_timestamp=None
-            )
 
             st.subheader('Recomendaciones Acción Inmediata')
-            recs = generate_recommendations(data, prob, shap_contrib=None)
+            recs = generate_recommendations(data_view, prob_v, shap_contrib=None)
             for r in recs:
                 sev_class = 'reco-high' if 'reemplazo' in r['accion'].lower() or 'inspección' in r['accion'].lower() else ('reco-medium' if 'ajustar' in r['accion'].lower() or 'reducir' in r['accion'].lower() else 'reco-low')
                 st.markdown(
@@ -711,36 +680,31 @@ def main():
                         - Medio (naranja): Ajuste operativo recomendado pronto.
                         - Bajo (verde): Condición estable, monitoreo continuo.
                         """)
-            
-            # Sistema de feedback manual
+
             st.markdown('<hr/>', unsafe_allow_html=True)
             st.subheader('Feedback Post-Operación')
-            
-            # Check if feedback was already given for this prediction
             feedback_given = st.session_state.get('feedback_given', False)
             if feedback_given:
                 st.info('✓ Ya se registró feedback para esta predicción. Haz una nueva predicción para continuar.')
             else:
                 st.caption('Marque si el fallo ocurrió o no después de esta operación para mejorar el modelo.')
-            
+
             col_fb1, col_fb2, col_fb3 = st.columns([2, 2, 3])
-            
             with col_fb1:
                 if st.button('✅ No ocurrió fallo', key='no_fail', disabled=feedback_given):
                     pred_stored = st.session_state.get('last_prediction_data')
                     if pred_stored:
-                        # Update the existing prediction row with Machine failure = 0
                         log_prediction(
                             data=pred_stored,
-                            prob=pred_stored.get('prob', 0.0),
+                            prob=float(pred_stored.get('prob', 0.0)),
                             pred=int(pred_stored.get('pred', 0)),
                             machine_failure=0,
                             feedback_timestamp=pd.Timestamp.utcnow()
                         )
-                        st.success('✅ Feedback registrado: **Sin fallo**')
-                        # Mark feedback as given
                         st.session_state.feedback_given = True
-                        # Combine and maybe retrain automatically
+                        # Clear active prediction UI and avoid re-logging the same prediction
+                        st.session_state.last_prediction_data = None
+                        st.session_state.suppress_logging = True
                         try:
                             preds_df = load_predictions(PRED_LOG)
                             combined = combine_predictions_with_feedback(preds_df, None)
@@ -748,33 +712,28 @@ def main():
                                 out = save_labeled_data(combined, os.path.join(os.path.dirname(__file__), '..', 'data', 'additional'))
                                 if out is not None:
                                     out_path, new_rows = out
-                                    st.info(f'📊 {new_rows} nuevas muestras preparadas para reentrenamiento')
                                     if new_rows >= 1:
-                                        st.info('🔄 Disparando reentrenamiento automático...')
                                         run_retrain()
                         except Exception as e:
                             st.warning(f'⚠️ No se pudo combinar/guardar feedback: {e}')
-                        # Force UI refresh
                         st.rerun()
                     else:
                         st.error('⚠️ No hay predicción activa. Primero realiza una predicción.')
-            
             with col_fb2:
                 if st.button('❌ Sí ocurrió fallo', key='fail', disabled=feedback_given):
                     pred_stored = st.session_state.get('last_prediction_data')
                     if pred_stored:
-                        # Update the existing prediction row with Machine failure = 1
                         log_prediction(
                             data=pred_stored,
-                            prob=pred_stored.get('prob', 0.0),
+                            prob=float(pred_stored.get('prob', 0.0)),
                             pred=int(pred_stored.get('pred', 0)),
                             machine_failure=1,
                             feedback_timestamp=pd.Timestamp.utcnow()
                         )
-                        st.error('❌ Feedback registrado: **Fallo confirmado**')
-                        # Mark feedback as given
                         st.session_state.feedback_given = True
-                        # Combine and maybe retrain automatically
+                        # Clear active prediction UI and avoid re-logging the same prediction
+                        st.session_state.last_prediction_data = None
+                        st.session_state.suppress_logging = True
                         try:
                             preds_df = load_predictions(PRED_LOG)
                             combined = combine_predictions_with_feedback(preds_df, None)
@@ -782,36 +741,42 @@ def main():
                                 out = save_labeled_data(combined, os.path.join(os.path.dirname(__file__), '..', 'data', 'additional'))
                                 if out is not None:
                                     out_path, new_rows = out
-                                    st.info(f'📊 {new_rows} nuevas muestras preparadas para reentrenamiento')
                                     if new_rows >= 1:
-                                        st.info('🔄 Disparando reentrenamiento automático...')
                                         run_retrain()
                         except Exception as e:
                             st.warning(f'⚠️ No se pudo combinar/guardar feedback: {e}')
-                        # Force UI refresh
                         st.rerun()
                     else:
                         st.error('⚠️ No hay predicción activa. Primero realiza una predicción.')
-            
-            # Notes input removed by user request: notes are no longer accepted separately; only feedback via the two buttons is recorded.
-            # Clear last prediction to avoid duplicate logging
+
             if st.button('Borrar predicción actual', key='clear_pred'):
-                removed = False
                 try:
-                    # Attempt to remove the already-logged row (if any)
-                    pred_stored = st.session_state.get('last_prediction_data')
-                    ts = pred_stored.get('prediction_timestamp') if pred_stored else None
-                    if ts is not None:
-                        removed = remove_prediction_entry(ts)
-                    # Clear session state and suppress any further logging on rerun
-                    st.session_state.last_prediction_data = None
-                    st.session_state.suppress_logging = True
+                    if not os.path.exists(PRED_LOG):
+                        st.session_state.last_prediction_data = None
+                        st.session_state.suppress_logging = True
+                        st.warning('No hay predicciones registradas. Genera una predicción antes de borrar.')
+                    else:
+                        try:
+                            _df_chk = pd.read_csv(PRED_LOG)
+                            is_empty = _df_chk.empty
+                        except Exception:
+                            is_empty = True
+                        if is_empty:
+                            st.session_state.last_prediction_data = None
+                            st.session_state.suppress_logging = True
+                            st.warning('No hay predicciones registradas. Genera una predicción antes de borrar.')
+                        else:
+                            removed = remove_last_prediction_row()
+                            st.session_state.last_prediction_data = None
+                            st.session_state.suppress_logging = True
+                            if removed:
+                                st.success('🗑️ Última fila eliminada de predicciones. No se registrará feedback para esta instancia.')
+                            else:
+                                st.info('No se pudo eliminar. Sesión limpiada y sin registro adicional.')
+                            st.rerun()
                 except Exception:
-                    pass
-                if removed:
-                    st.success('🗑️ Predicción eliminada del histórico. No se registrará feedback para esta instancia.')
-                else:
-                    st.info('Predicción actual borrada de la sesión. No se registrará cuando se haga feedback.')
+                    st.info('No se pudo eliminar. Sesión limpiada y sin registro adicional.')
+                    st.rerun()
 
 
 
@@ -941,12 +906,15 @@ def main():
                     
                         # Mostrar tabla detallada con TODAS las variables
                         st.markdown('#### Detalle de Contribuciones')
+                        st.caption('Nota: Si una variable aparece con contribución 0 puede ser porque el modelo no usa esa característica o está codificada/agrupada en otras (p. ej. one-hot).')
                         for i, (feat, val) in enumerate(contrib, 1):
-                            clazz = 'shap-risk' if val > 0 else 'shap-safe'
-                            direction = 'AUMENTA' if val > 0 else 'REDUCE'
+                            is_zero = abs(float(val)) < 1e-12
+                            clazz = 'shap-risk' if (val > 0 and not is_zero) else ('shap-safe' if (val <= 0 and not is_zero) else '')
+                            direction = ('AUMENTA' if val > 0 else 'REDUCE') if not is_zero else '—'
+                            suffix = ' <span style="color:#616161;">(no usada por el modelo)</span>' if is_zero else ''
                             st.markdown(
                                 f"<div class='shap-row {clazz}'>"
-                                f"<strong>{i}. {feat}</strong>: {val:+.4f} → {direction} el riesgo"
+                                f"<strong>{i}. {feat}{suffix}</strong>: {val:+.4f} → {direction} el riesgo"
                                 f"</div>", 
                                 unsafe_allow_html=True
                             )

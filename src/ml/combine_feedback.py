@@ -209,17 +209,27 @@ def combine_predictions_with_feedback(predictions_df, feedback_df, time_window_m
 
 
 def save_labeled_data(combined_df, output_dir):
-    """Guarda el dataset etiquetado para reentrenamiento"""
+    """Guarda el dataset etiquetado para reentrenamiento en archivos consolidados.
+
+        Cambios clave:
+        - En lugar de crear múltiples archivos con timestamp, consolida todo en:
+            * feedback_labeled_all.csv (solo columnas de entrenamiento)
+            * feedback_full_all.csv (con metadatos, incluyendo _prediction_timestamp)
+        - Deduplica por _prediction_timestamp.
+        - Migra archivos antiguos feedback_labeled_* y feedback_full_* a los consolidados y los elimina.
+    """
     if combined_df is None or len(combined_df) == 0:
         print("No hay datos para guardar")
         return None
     
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Archivo con timestamp
-    os.makedirs(output_dir, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_path = os.path.join(output_dir, f'feedback_labeled_{timestamp}.csv')
+
+    # Rutas consolidadas
+    consolidated_labeled = os.path.join(output_dir, 'feedback_labeled_all.csv')
+    consolidated_full = os.path.join(output_dir, 'feedback_full_all.csv')
+
+    # Migrar archivos antiguos a consolidados (una vez) y eliminarlos
+    _consolidate_previous_files(output_dir, consolidated_labeled, consolidated_full)
 
     # Guardar solo las columnas relevantes para entrenamiento (columnas del dataset original)
     training_cols = [
@@ -229,15 +239,11 @@ def save_labeled_data(combined_df, output_dir):
         'Machine failure', 'TWF', 'HDF', 'PWF', 'OSF', 'RNF'
     ]
 
-    # Dedupe: avoid writing rows that already exist in previously saved files
-    # Use internal _prediction_timestamp for deduplication but don't save it in final CSV
+    # Dedupe: evitar escribir filas ya existentes (basado en _prediction_timestamp)
     existing_timestamps = set()
-    for fname in os.listdir(output_dir):
-        if not fname.lower().endswith('.csv') or not fname.startswith('feedback_full_'):
-            continue
-        fpath = os.path.join(output_dir, fname)
+    if os.path.exists(consolidated_full):
         try:
-            tmp = pd.read_csv(fpath)
+            tmp = pd.read_csv(consolidated_full)
             if '_prediction_timestamp' in tmp.columns:
                 existing_timestamps.update(tmp['_prediction_timestamp'].astype(str).tolist())
         except Exception:
@@ -254,16 +260,107 @@ def save_labeled_data(combined_df, output_dir):
         print('No hay nuevos registros etiquetados para guardar en output_dir')
         return None
 
+    # Append a consolidados
     new_rows_to_save = new_rows[training_cols].copy()
-    new_rows_to_save.to_csv(output_path, index=False)
-    print(f"Dataset etiquetado guardado en: {output_path} ({len(new_rows_to_save)} nuevos)")
+    # Labeled (solo columnas de entrenamiento)
+    write_header_l = not os.path.exists(consolidated_labeled)
+    new_rows_to_save.to_csv(consolidated_labeled, mode='a', header=write_header_l, index=False)
+    print(f"Dataset etiquetado consolidado en: {consolidated_labeled} (+{len(new_rows_to_save)})")
 
-    # También guardar versión completa con metadata
-    full_output_path = os.path.join(output_dir, f'feedback_full_{timestamp}.csv')
-    new_rows.to_csv(full_output_path, index=False)
-    print(f"Dataset completo guardado en: {full_output_path}")
+    # Full con metadatos
+    write_header_f = not os.path.exists(consolidated_full)
+    new_rows.to_csv(consolidated_full, mode='a', header=write_header_f, index=False)
+    print(f"Dataset completo consolidado en: {consolidated_full} (+{len(new_rows)})")
 
-    return output_path, len(new_rows_to_save)
+    # No crear nuevos archivos con timestamp; consolidación evita acumulación
+
+    return consolidated_labeled, len(new_rows_to_save)
+
+
+def _prune_additional_dir(output_dir: str, keep_last_n: int = 10):
+    """Mantiene solo los últimos 'keep_last_n' archivos por tipo (feedback_labeled_*, feedback_full_*)."""
+    if not os.path.isdir(output_dir):
+        return
+    def _collect(prefix: str):
+        items = []
+        for fname in os.listdir(output_dir):
+            if fname.startswith(prefix) and fname.lower().endswith('.csv'):
+                fpath = os.path.join(output_dir, fname)
+                try:
+                    mtime = os.path.getmtime(fpath)
+                except Exception:
+                    mtime = 0
+                items.append((fpath, mtime))
+        # newest first
+        items.sort(key=lambda x: x[1], reverse=True)
+        return items
+    for pref in ['feedback_labeled_', 'feedback_full_']:
+        items = _collect(pref)
+        if not items:
+            continue
+        to_remove = items[keep_last_n:]
+        for fpath, _ in to_remove:
+            try:
+                os.remove(fpath)
+                print(f"   Pruned additional file: {os.path.basename(fpath)}")
+            except Exception:
+                pass
+
+
+def _consolidate_previous_files(output_dir: str, consolidated_labeled: str, consolidated_full: str):
+    """Construye archivos únicos 'feedback_full_all.csv' y 'feedback_labeled_all.csv' a partir de
+    archivos previos con timestamp, deduplicando por _prediction_timestamp, y elimina los antiguos.
+    """
+    if not os.path.isdir(output_dir):
+        return
+    full_frames = []
+    # Incluir consolidado existente si ya existe
+    if os.path.exists(consolidated_full):
+        try:
+            full_frames.append(pd.read_csv(consolidated_full))
+        except Exception:
+            pass
+    # Recolectar archivos full con timestamp
+    for fname in os.listdir(output_dir):
+        if fname.startswith('feedback_full_') and fname.lower().endswith('.csv'):
+            fpath = os.path.join(output_dir, fname)
+            try:
+                df = pd.read_csv(fpath)
+                full_frames.append(df)
+            except Exception:
+                continue
+    if full_frames:
+        try:
+            merged_full = pd.concat(full_frames, ignore_index=True)
+            # Dedupe por _prediction_timestamp si existe
+            if '_prediction_timestamp' in merged_full.columns:
+                merged_full['_prediction_timestamp'] = merged_full['_prediction_timestamp'].astype(str)
+                merged_full = merged_full.drop_duplicates(subset=['_prediction_timestamp'], keep='last')
+            merged_full.to_csv(consolidated_full, index=False)
+            # Derivar labeled desde full consolidado
+            training_cols = [
+                'UDI', 'Product ID', 'Type',
+                'Air temperature [K]', 'Process temperature [K]',
+                'Rotational speed [rpm]', 'Torque [Nm]', 'Tool Wear [min]' if 'Tool Wear [min]' in merged_full.columns else 'Tool wear [min]',
+                'Machine failure', 'TWF', 'HDF', 'PWF', 'OSF', 'RNF'
+            ]
+            # Normalizar nombre de tool wear en conjunto
+            if 'Tool Wear [min]' in merged_full.columns and 'Tool wear [min]' not in merged_full.columns:
+                merged_full = merged_full.rename(columns={'Tool Wear [min]': 'Tool wear [min]'} )
+            labeled_from_full = merged_full[[c for c in training_cols if c in merged_full.columns]].copy()
+            labeled_from_full.to_csv(consolidated_labeled, index=False)
+            # Eliminar archivos con timestamp
+            for fname in list(os.listdir(output_dir)):
+                if (fname.startswith('feedback_full_') or fname.startswith('feedback_labeled_')) and fname.lower().endswith('.csv'):
+                    # No eliminar los archivos consolidados
+                    if fname in [os.path.basename(consolidated_full), os.path.basename(consolidated_labeled)]:
+                        continue
+                    try:
+                        os.remove(os.path.join(output_dir, fname))
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Advertencia: no se pudo consolidar archivos antiguos en {output_dir}: {e}")
 
 
 def main():

@@ -182,34 +182,82 @@ def shap_for_instance(data_dict: dict):
         sv_used = _shap_to_array(sv_all)
     # Map feature names post-transform if pipeline
     if 'pre' in model.named_steps:
-        # OneHot feature names
-        ohe = model.named_steps['pre'].transformers_[1][1].named_steps['onehot']
-        num_cols = model.named_steps['pre'].transformers_[0][2]
-        cat_cols = model.named_steps['pre'].transformers_[1][2]
-        cat_names = list(ohe.get_feature_names_out(cat_cols))
-        feature_names = num_cols + cat_names
-        # Agrupar contribuciones por característica original para OHE (mejor interpretabilidad)
+        pre = model.named_steps['pre']
+        # Get transformed feature names robustly
+        feature_names_out = None
+        num_cols = []
+        cat_cols = []
+        ohe = None
+        try:
+            feature_names_out = list(pre.get_feature_names_out())
+        except Exception:
+            feature_names_out = None
+        # Also gather transformer pieces by name to compute counts if needed
+        try:
+            # Find 'num' and 'cat' slots irrespective of order
+            for name, tr, cols in getattr(pre, 'transformers_', []):
+                if name == 'num':
+                    if isinstance(cols, slice):
+                        num_cols = []
+                    else:
+                        try:
+                            num_cols = list(cols)
+                        except Exception:
+                            num_cols = []
+                if name == 'cat':
+                    if isinstance(cols, slice):
+                        cat_cols = []
+                    else:
+                        try:
+                            cat_cols = list(cols)
+                        except Exception:
+                            cat_cols = []
+                    try:
+                        ohe = tr.named_steps['onehot']
+                    except Exception:
+                        ohe = None
+        except Exception:
+            pass
+        # Build fallback names if necessary and ensure length alignment with SHAP values
         agg = {}
-        # sv_used normalized to 2D (n_samples, n_features)
         vals = np.asarray(sv_used)
         if vals.ndim == 2:
             vals = vals[0]
         else:
             vals = np.asarray(vals).reshape(-1)
-        for fname, val in zip(feature_names, vals):
-            grouped = False
-            # Agrupar todas las columnas one-hot que pertenecen a la misma categoría original
-            for cat in cat_cols:
-                prefix = f"{cat}_"
-                if fname.startswith(prefix):
-                    # val might be array-like; sum to scalar if needed
-                    agg_val = _to_scalar(val)
-                    agg[cat] = agg.get(cat, 0.0) + agg_val
-                    grouped = True
-                    break
-            if not grouped:
-                scalar_val = _to_scalar(val)
-                agg[fname] = agg.get(fname, 0.0) + scalar_val
+        # Preferred: use feature_names_out if it matches length
+        if feature_names_out is not None and len(feature_names_out) == len(vals):
+            for fname, val in zip(feature_names_out, vals):
+                base = str(fname)
+                if '__' in base:
+                    _, base = base.split('__', 1)
+                if base.startswith('type_'):
+                    base = 'type'
+                agg[base] = agg.get(base, 0.0) + _to_scalar(val)
+        else:
+            # Derive names by segmenting vals into numeric + onehot parts using counts
+            n_num = len(num_cols)
+            n_cat = 0
+            cat_names = []
+            try:
+                if ohe is not None and cat_cols:
+                    cat_names = list(ohe.get_feature_names_out(cat_cols))
+                    n_cat = len(cat_names)
+            except Exception:
+                cat_names = []
+                n_cat = 0
+            if n_num + n_cat == len(vals) and (n_num > 0 or n_cat > 0):
+                # Map first n_num to numeric names, rest to 'type'
+                for i in range(n_num):
+                    name = str(num_cols[i]) if i < len(num_cols) else f"num_{i}"
+                    agg[name] = agg.get(name, 0.0) + _to_scalar(vals[i])
+                for j in range(n_num, n_num + n_cat):
+                    # group all one-hot to 'type'
+                    agg['type'] = agg.get('type', 0.0) + _to_scalar(vals[j])
+            else:
+                # Last resort: map by index but avoid f0/f1 confusion by labeling as unknown_i
+                for i, val in enumerate(vals):
+                    agg[f"unknown_{i}"] = agg.get(f"unknown_{i}", 0.0) + _to_scalar(val)
         contrib = sorted(agg.items(), key=lambda x: abs(x[1]), reverse=True)
     else:
         feature_names = list(row_df.columns)
@@ -223,5 +271,12 @@ def shap_for_instance(data_dict: dict):
         for v in vals:
             safe_vals.append(_to_scalar(v))
         contrib = sorted(zip(feature_names, safe_vals), key=lambda x: abs(x[1]), reverse=True)
-    # Return all contributions by default (UI will decide how to render/limit)
+    # Ensure we return also canonical features not used by the model (contrib 0)
+    used_names = [k for k, _ in contrib]
+    canonical = ['air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','delta_temp_k','omega_rad_s','power_w','wear_pct','type']
+    missing = [c for c in canonical if c not in used_names]
+    for m in missing:
+        contrib.append((m, 0.0))
+    # Sort again preserving high-abs contributions first, but keep zeros grouped at the end
+    contrib = sorted([c for c in contrib if c[1] != 0.0], key=lambda x: abs(x[1]), reverse=True) + [c for c in contrib if c[1] == 0.0]
     return contrib
