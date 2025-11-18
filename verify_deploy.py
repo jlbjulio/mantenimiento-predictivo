@@ -37,7 +37,11 @@ def check_requirements():
     with open('requirements.txt', 'r') as f:
         content = f.read().lower()
     
-    required_packages = ['streamlit', 'pandas', 'scikit-learn', 'joblib', 'shap']
+    required_packages = [
+        'streamlit', 'pandas', 'scikit-learn', 'joblib', 'shap',
+        'numpy', 'plotly', 'altair', 'fastapi', 'uvicorn',
+        'python-dateutil', 'pydantic'
+    ]
     missing = []
     
     for pkg in required_packages:
@@ -49,6 +53,83 @@ def check_requirements():
         return False
     else:
         print("✅ requirements.txt contiene todos los paquetes necesarios")
+        return True
+
+def scan_imports_vs_requirements():
+    """Escanea imports del proyecto y compara con requirements.txt"""
+    print("\n🔎 Escaneo de imports vs requirements:")
+
+    # Mapeo de nombres de import -> paquete pip
+    import_to_pip = {
+        'sklearn': 'scikit-learn',
+        'dateutil': 'python-dateutil',
+        'pandas': 'pandas',
+        'numpy': 'numpy',
+        'joblib': 'joblib',
+        'shap': 'shap',
+        'streamlit': 'streamlit',
+        'plotly': 'plotly',
+        'altair': 'altair',
+        'pytest': 'pytest',
+        'fastapi': 'fastapi',
+        'uvicorn': 'uvicorn',
+        'pydantic': 'pydantic',
+    }
+
+    # Cargar requirements
+    req_set = set()
+    if os.path.exists('requirements.txt'):
+        with open('requirements.txt', 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                pkg = line.split('==')[0].lower()
+                req_set.add(pkg)
+
+    # Recolectar imports simples (heurística)
+    imported = set()
+    for root, dirs, files in os.walk('.'):
+        # Excluir carpetas no relevantes
+        dirs[:] = [d for d in dirs if d not in ['.git', '.venv', 'venv', '__pycache__', '.streamlit', 'models', 'logs', 'data']]
+        for file in files:
+            if file.endswith('.py'):
+                path = os.path.join(root, file)
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line.startswith('import '):
+                                # import x, y.z
+                                parts = line.replace('import', '', 1).strip().split(',')
+                                for p in parts:
+                                    top = p.strip().split(' ')[0].split('.')[0]
+                                    imported.add(top)
+                            elif line.startswith('from '):
+                                # from x.y import z
+                                mod = line.split(' ')[1].split('.')[0]
+                                imported.add(mod)
+                except Exception:
+                    pass
+
+    # Filtrar a lo que nos interesa (externos conocidos)
+    externals = set(import_to_pip.keys())
+    imported_externals = sorted(externals.intersection(imported))
+
+    # Convertir a paquetes pip
+    needed_pkgs = sorted({import_to_pip[name] for name in imported_externals})
+
+    # Comparar con requirements
+    missing = [pkg for pkg in needed_pkgs if pkg not in req_set]
+
+    print(f"   Imports detectados: {', '.join(imported_externals) if imported_externals else '(ninguno)'}")
+    if missing:
+        print("❌ Faltan en requirements.txt:")
+        for m in missing:
+            print(f"   - {m}")
+        return False
+    else:
+        print("✅ Todos los imports externos están cubiertos en requirements.txt")
         return True
 
 def check_models():
@@ -106,6 +187,7 @@ def main():
     # 5. Requirements
     print("\n📦 Dependencias:")
     all_good &= check_requirements()
+    all_good &= scan_imports_vs_requirements()
     
     # 6. Modelos entrenados
     print("\n🤖 Modelos de ML:")
