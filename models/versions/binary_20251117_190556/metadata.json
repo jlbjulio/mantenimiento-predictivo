@@ -1,0 +1,14 @@
+{
+  "version": "20251117_190556",
+  "model_type": "binary",
+  "created_at": "2025-11-17T19:05:59.839763",
+  "metrics_summary": {
+    "aucs": {
+      "random_forest": 0.966150590671051,
+      "gradient_boosting": 0.9759278711484595,
+      "logistic_regression": 0.9339681524783827
+    }
+  },
+  "best_model": "gradient_boosting",
+  "trained_samples": 10000
+}
