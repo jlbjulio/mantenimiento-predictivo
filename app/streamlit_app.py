@@ -245,6 +245,12 @@ def load_metrics_status():
     return status
 
 def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = None, feedback_timestamp: pd.Timestamp = None):
+    # Safety guard: allow suppressing writes during UI actions like "Borrar predicción"
+    try:
+        if st.session_state.get('suppress_logging', False):
+            return
+    except Exception:
+        pass
     header = ['timestamp','air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob','Machine failure','feedback_timestamp']
     write_header = not os.path.exists(PRED_LOG)
     # Ensure CSV header includes new columns; if not, upgrade existing CSV adding missing cols
@@ -527,6 +533,8 @@ def main():
         if st.button('Calcular Predicción y Recomendaciones'):
             # Reset feedback flag for new prediction
             st.session_state.feedback_given = False
+            # Enable logging for this new prediction
+            st.session_state.suppress_logging = False
             
             data = {
                 'air_temp_k': air_temp,
@@ -770,6 +778,8 @@ def main():
             if st.button('Borrar predicción actual', key='clear_pred'):
                 try:
                     st.session_state.last_prediction_data = None
+                    # Suppress any accidental logging on rerun after clearing
+                    st.session_state.suppress_logging = True
                 except Exception:
                     pass
                 st.info('Predicción actual borrada. No se registrará cuando se haga feedback.')
