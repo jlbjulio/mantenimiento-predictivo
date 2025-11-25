@@ -542,7 +542,7 @@ def main():
     # Check if there's a pending prediction to disable inputs
     has_pending_prediction = st.session_state.get('last_prediction_data') is not None
     if has_pending_prediction:
-        st.sidebar.warning('⚠️ Confirma el feedback de la predicción actual para modificar parámetros.')
+        st.sidebar.warning('Confirma el feedback de la predicción actual para modificar parámetros.')
     # Use number_input instead of sliders to allow values beyond dataset bounds
     air_temp = st.sidebar.number_input('Temperatura ambiente [K]', value=300.0, step=0.1, format="%.1f", disabled=has_pending_prediction)
     process_temp = st.sidebar.number_input('Temperatura de proceso [K]', value=310.0, step=0.1, format="%.1f", disabled=has_pending_prediction)
@@ -580,7 +580,7 @@ def main():
         # Disable prediction button if there's a pending prediction without feedback
         has_pending_prediction = st.session_state.get('last_prediction_data') is not None
         if has_pending_prediction:
-            st.info('⚠️ Debes confirmar el feedback de la predicción actual antes de calcular una nueva o modificar parámetros.')
+            st.info('Debes confirmar el feedback de la predicción actual antes de calcular una nueva o modificar parámetros.')
         
         if st.button('Calcular Predicción y Recomendaciones', disabled=has_pending_prediction):
             st.session_state.feedback_given = False
@@ -725,10 +725,10 @@ def main():
                                     if new_rows >= 1:
                                         run_retrain()
                         except Exception as e:
-                            st.warning(f'⚠️ No se pudo combinar/guardar feedback: {e}')
+                            st.warning(f'No se pudo combinar/guardar feedback: {e}')
                         st.rerun()
                     else:
-                        st.error('⚠️ No hay predicción activa. Primero realiza una predicción.')
+                        st.error('No hay predicción activa. Primero realiza una predicción.')
             with col_fb2:
                 if st.button('❌ Sí ocurrió fallo', key='fail', disabled=feedback_given):
                     pred_stored = st.session_state.get('last_prediction_data')
@@ -754,10 +754,10 @@ def main():
                                     if new_rows >= 1:
                                         run_retrain()
                         except Exception as e:
-                            st.warning(f'⚠️ No se pudo combinar/guardar feedback: {e}')
+                            st.warning(f'No se pudo combinar/guardar feedback: {e}')
                         st.rerun()
                     else:
-                        st.error('⚠️ No hay predicción activa. Primero realiza una predicción.')
+                        st.error('No hay predicción activa. Primero realiza una predicción.')
 
             if st.button('Borrar predicción actual', key='clear_pred'):
                 try:
@@ -849,7 +849,7 @@ def main():
             """)
         
         if st.session_state.get('last_prediction_data', None) is None:
-            st.warning('⚠️ Primero realiza una predicción en la pestaña "Predicción" para generar explicaciones SHAP.')
+            st.warning('Primero realiza una predicción en la pestaña "Predicción" para generar explicaciones SHAP.')
         else:
             # Mostrar parámetros de la última predicción
             st.markdown('#### Parámetros de la Predicción Actual')
