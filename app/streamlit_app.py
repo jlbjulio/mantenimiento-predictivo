@@ -539,13 +539,17 @@ def main():
     w_min, w_max = dyn_range('tool_wear_min')
 
     st.sidebar.header('Entrada de Parámetros Operativos')
+    # Check if there's a pending prediction to disable inputs
+    has_pending_prediction = st.session_state.get('last_prediction_data') is not None
+    if has_pending_prediction:
+        st.sidebar.warning('⚠️ Confirma el feedback de la predicción actual para modificar parámetros.')
     # Use number_input instead of sliders to allow values beyond dataset bounds
-    air_temp = st.sidebar.number_input('Temperatura ambiente [K]', value=300.0, step=0.1, format="%.1f")
-    process_temp = st.sidebar.number_input('Temperatura de proceso [K]', value=310.0, step=0.1, format="%.1f")
-    rot_speed = st.sidebar.number_input('Velocidad de rotación [rpm]', value=1500.0, step=1.0, format="%.0f")
-    torque = st.sidebar.number_input('Torque [Nm]', value=40.0, step=0.1, format="%.1f")
-    wear = st.sidebar.number_input('Desgaste herramienta [min]', value=50.0, step=1.0, format="%.0f")
-    prod_type = st.sidebar.selectbox('Tipo de producto', ['L','M','H'])
+    air_temp = st.sidebar.number_input('Temperatura ambiente [K]', value=300.0, step=0.1, format="%.1f", disabled=has_pending_prediction)
+    process_temp = st.sidebar.number_input('Temperatura de proceso [K]', value=310.0, step=0.1, format="%.1f", disabled=has_pending_prediction)
+    rot_speed = st.sidebar.number_input('Velocidad de rotación [rpm]', value=1500.0, step=1.0, format="%.0f", disabled=has_pending_prediction)
+    torque = st.sidebar.number_input('Torque [Nm]', value=40.0, step=0.1, format="%.1f", disabled=has_pending_prediction)
+    wear = st.sidebar.number_input('Desgaste herramienta [min]', value=50.0, step=1.0, format="%.0f", disabled=has_pending_prediction)
+    prod_type = st.sidebar.selectbox('Tipo de producto', ['L','M','H'], disabled=has_pending_prediction)
     st.sidebar.markdown("""
 **Tipos de Producto:**
 - **L (Low)**: Calidad baja, mayor tolerancia a strain (≤11,000)
@@ -576,7 +580,7 @@ def main():
         # Disable prediction button if there's a pending prediction without feedback
         has_pending_prediction = st.session_state.get('last_prediction_data') is not None
         if has_pending_prediction:
-            st.info('⚠️ Debes confirmar el feedback de la predicción actual antes de calcular una nueva.')
+            st.info('⚠️ Debes confirmar el feedback de la predicción actual antes de calcular una nueva o modificar parámetros.')
         
         if st.button('Calcular Predicción y Recomendaciones', disabled=has_pending_prediction):
             st.session_state.feedback_given = False
