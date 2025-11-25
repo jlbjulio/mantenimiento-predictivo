@@ -1128,7 +1128,6 @@ def main():
             st.info('No existe archivo de historial todavía. Genere una predicción en la pestaña "Predicción" para crear el log.')
 
 if __name__ == '__main__':
-    print("Ejecute con: streamlit run app/streamlit_app.py")
     main()
 
 # Estilos CSS para tarjetas
