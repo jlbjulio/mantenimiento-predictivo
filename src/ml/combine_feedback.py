@@ -128,10 +128,25 @@ def combine_predictions_with_feedback(predictions_df, feedback_df, time_window_m
         if 'machine_failure' not in predictions_df.columns:
             print('No hay feedback embebido en predicciones (busque machine_failure en predicciones)')
             return None
-        # Map predictions columns to training columns and return rows with machine_failure in [0,1]
-        labeled = predictions_df[predictions_df['machine_failure'].isin([0, 1])].copy()
+        
+        # Filtrar filas con valores válidos en Machine failure y feedback_timestamp
+        # Ignorar filas con valores vacíos, None, NaN o strings vacíos
+        valid_mask = (
+            predictions_df['machine_failure'].notna() &
+            (predictions_df['machine_failure'] != '') &
+            predictions_df['machine_failure'].isin([0, 1, 0.0, 1.0])
+        )
+        
+        # Si existe columna feedback_timestamp, también validarla
+        if 'feedback_timestamp' in predictions_df.columns:
+            valid_mask &= (
+                predictions_df['feedback_timestamp'].notna() &
+                (predictions_df['feedback_timestamp'].astype(str).str.strip() != '')
+            )
+        
+        labeled = predictions_df[valid_mask].copy()
         if labeled.empty:
-            print('No se encontraron predicciones etiquetadas con machine_failure')
+            print('No se encontraron predicciones etiquetadas con machine_failure y feedback_timestamp válidos')
             return None
         combined = []
         for idx, row in labeled.iterrows():
