@@ -572,7 +572,13 @@ def main():
         col6.metric('Tipo', prod_type)
         st.caption('Indicadores clave del instante operativo. El desgaste (%) se calcula sobre 240 min como límite superior.')
         st.markdown('<hr/>', unsafe_allow_html=True)
-        if st.button('Calcular Predicción y Recomendaciones'):
+        
+        # Disable prediction button if there's a pending prediction without feedback
+        has_pending_prediction = st.session_state.get('last_prediction_data') is not None
+        if has_pending_prediction:
+            st.info('⚠️ Debes confirmar el feedback de la predicción actual antes de calcular una nueva.')
+        
+        if st.button('Calcular Predicción y Recomendaciones', disabled=has_pending_prediction):
             st.session_state.feedback_given = False
             st.session_state.suppress_logging = False
             data = {
