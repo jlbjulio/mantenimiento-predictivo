@@ -619,7 +619,7 @@ def main():
                     'threshold': {'line': {'color': '#c62828', 'width': 4}, 'thickness': 0.75, 'value': prob_v*100}
                 }
             ))
-            st.plotly_chart(gauge, width='stretch')
+            st.plotly_chart(gauge, use_container_width=True)
 
             delta_temp = float(data_view['process_temp_k']) - float(data_view['air_temp_k'])
             omega = float(data_view['rot_speed_rpm']) * 2 * 3.141592653589793 / 60
@@ -660,7 +660,7 @@ def main():
             fig_metrics.update_xaxes(showticklabels=False)
             fig_metrics.update_layout(showlegend=False, height=500, font=dict(size=14),
                                       title_text="Análisis de Parámetros Críticos vs Umbrales de Seguridad", title_font_size=18)
-            st.plotly_chart(fig_metrics, width='stretch')
+            st.plotly_chart(fig_metrics, use_container_width=True)
             st.caption("""**Interpretación de colores:** 
             - **Rojo**: Parámetro en zona crítica - requiere acción inmediata
             - **Naranja**: Parámetro en zona de precaución - monitorear de cerca
@@ -902,7 +902,7 @@ def main():
                         )
                         fig_shap.add_vline(x=0, line_width=2, line_color='black', line_dash='dash')
                         
-                        st.plotly_chart(fig_shap, width='stretch')
+                        st.plotly_chart(fig_shap, use_container_width=True)
                     
                         # Mostrar tabla detallada con TODAS las variables
                         st.markdown('#### Detalle de Contribuciones')
@@ -1035,7 +1035,7 @@ def main():
                         hovermode='x unified',
                         yaxis=dict(tickformat='.0%', range=[0, 1])
                     )
-                    st.plotly_chart(fig_risk, width='stretch')
+                    st.plotly_chart(fig_risk, use_container_width=True)
                     
                     # Gráficos de parámetros operativos
                     st.markdown('### Evolución de Parámetros Operativos')
@@ -1096,7 +1096,7 @@ def main():
                     fig_params.update_yaxes(title_font_size=12, tickfont_size=11)
                     fig_params.update_annotations(font_size=14)
                     
-                    st.plotly_chart(fig_params, width='stretch')
+                    st.plotly_chart(fig_params, use_container_width=True)
                     
                     st.caption(f'Mostrando {len(hist_filtered)} registros del período seleccionado. Las líneas muestran la tendencia temporal de cada parámetro.')
                     
@@ -1106,7 +1106,7 @@ def main():
                     display_cols = ['timestamp','air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','prob']
                     st.dataframe(
                         hist_filtered.tail(num_show)[display_cols].style.format({'prob': '{:.2%}'}),
-                        width='stretch',
+                        use_container_width=True,
                         height=400
                     )
                 else:
