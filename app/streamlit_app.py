@@ -952,8 +952,9 @@ def main():
                     # Convert tz-aware to naive (drop timezone info)
                     def _drop_tz(x):
                         try:
-                            if x.tzinfo is not None:
-                                return x.tz_convert(None)
+                            if pd.notna(x) and hasattr(x, 'tz_localize'):
+                                if x.tzinfo is not None:
+                                    return x.tz_localize(None)
                             return x
                         except Exception:
                             return x
@@ -980,8 +981,8 @@ def main():
                     
                     
                     
-                    # Filtrar según rango temporal
-                    now = pd.Timestamp.utcnow()
+                    # Filtrar según rango temporal - usar Timestamp naive (sin timezone)
+                    now = pd.Timestamp.now()
                     if time_range == 'Última hora':
                         hist_filtered = hist[hist['timestamp'] >= now - pd.Timedelta(hours=1)]
                     elif time_range == 'Últimas 6 horas':
