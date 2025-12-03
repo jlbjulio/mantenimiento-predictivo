@@ -13,7 +13,6 @@ https://mantenimiento-predictivo.streamlit.app/
 - Motor de recomendaciones accionables basado en reglas
 - Interfaz Streamlit intuitiva con 4 pestañas
 - **Sistema de feedback manual** para marcar si ocurrió o no un fallo
-- **Combinación automática** de predicciones con feedback para reentrenamiento
 - **Versionado automático de modelos** con historial y metadata completa
 
 ## Estructura
@@ -23,7 +22,6 @@ ProyectoFinalSI/
 ├── ai4i2020.csv                  # Dataset original
 ├── requirements.txt              # Dependencias
 ├── README.md                     # Esta guía
-├── DOCUMENTACION_COMPLETA.md     # Documentación consolidada completa
 ├── app/
 │   └── streamlit_app.py          # Interfaz de usuario
 ├── src/
