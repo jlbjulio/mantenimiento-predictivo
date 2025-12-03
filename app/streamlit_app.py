@@ -219,29 +219,91 @@ def predict_instance(model, user_data: dict):
     pred = model.predict(df_row_aligned)[0]
     return pred, prob
 
+def calibrated_probability(user_data: dict, model_prob: float, k_neighbors: int = 25, alpha: float = 0.7) -> float:
+    """Blend model probability with empirical failure rate from similar historical cases in logs/predicciones.csv.
+    - No retraining; uses existing labeled feedback (Machine failure) only.
+    - alpha controls trust in model vs empirical (alpha closer to 1 trusts model more).
+    """
+    try:
+        if not os.path.exists(PRED_LOG):
+            return float(model_prob)
+        hist = pd.read_csv(PRED_LOG, engine='python', on_bad_lines='warn')
+        # Require valid feedback to contribute
+        valid = hist.copy()
+        valid = valid[valid['Machine failure'].isin([0.0, 1.0, 0, 1])]
+        valid = valid[pd.to_datetime(valid.get('feedback_timestamp', ''), errors='coerce').notna()]
+        if valid.empty:
+            return float(model_prob)
+        # Build feature matrix
+        feats = ['air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min']
+        # Normalize numeric features to comparable scales
+        def _norm(col, x):
+            try:
+                c = valid[col].astype(float)
+                mn, mx = c.min(), c.max()
+                if mx > mn:
+                    return (x - mn) / (mx - mn)
+                return 0.5
+            except Exception:
+                return 0.5
+        q = {f: float(user_data.get(f)) for f in feats}
+        qn = {f: _norm(f, q[f]) for f in feats}
+        # Compute distances
+        dists = []
+        for idx, row in valid.iterrows():
+            try:
+                rn = {f: _norm(f, float(row.get(f))) for f in feats}
+                # Euclidean on normalized features
+                dist = 0.0
+                for f in feats:
+                    dist += (qn[f] - rn[f])**2
+                # Type penalty if different
+                type_pen = 0.0 if str(row.get('type')) == str(user_data.get('type')) else 0.15
+                dists.append((dist + type_pen, float(row.get('Machine failure', 0.0))))
+            except Exception:
+                continue
+        if not dists:
+            return float(model_prob)
+        dists.sort(key=lambda x: x[0])
+        neighbors = dists[:max(1, k_neighbors)]
+        empirical = sum([mf for _, mf in neighbors]) / len(neighbors)
+        calib = float(alpha) * float(model_prob) + (1.0 - float(alpha)) * float(empirical)
+        # Clamp to [0.0, 1.0]
+        calib = max(0.0, min(1.0, calib))
+        return calib
+    except Exception:
+        return float(model_prob)
+
 def best_model_name():
-    if os.path.exists(METRICS_PATH):
-        try:
-            m = joblib.load(METRICS_PATH)
-            return m.get('best', 'desconocido')
-        except Exception:
-            return 'desconocido'
-    return 'no entrenado'
+    # Proyecto revisado: el mejor modelo queda fijado en Gradient Boosting
+    return 'GradientBoosting'
 
 def load_metrics_status():
     status = {}
+    status['best_model'] = 'GradientBoosting'
+    
+    # Cargar métricas si existen
     if os.path.exists(METRICS_PATH):
         try:
-            data = joblib.load(METRICS_PATH)
-            status['best_model'] = data.get('best')
-            status['aucs'] = data.get('aucs')
-        except Exception as e:
-            status['error'] = str(e)
-    else:
-        status['message'] = 'Ejecute entrenamiento: python -m src.ml.train'
+            metrics = joblib.load(METRICS_PATH)
+            if isinstance(metrics, dict) and 'aucs' in metrics:
+                status['aucs'] = metrics['aucs']
+            elif isinstance(metrics, dict):
+                # Si metrics tiene claves como 'RandomForest', 'GradientBoosting', etc.
+                aucs = {}
+                for model_name, model_metrics in metrics.items():
+                    if isinstance(model_metrics, dict) and 'auc' in model_metrics:
+                        aucs[model_name] = model_metrics['auc']
+                if aucs:
+                    status['aucs'] = aucs
+        except Exception:
+            pass
+    
     if os.path.exists(MODEL_PATH):
         status['model_file'] = MODEL_PATH
         status['last_modified'] = str(pd.to_datetime(os.path.getmtime(MODEL_PATH), unit='s'))
+    else:
+        status['message'] = 'Entrene una vez el modelo base con el dataset original.'
     return status
 
 def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = None, feedback_timestamp: pd.Timestamp = None):
@@ -457,14 +519,8 @@ def bulk_log(df: pd.DataFrame):
             w.writerow([pd.Timestamp.utcnow(), row.get('air_temp_k'), row.get('process_temp_k'), row.get('rot_speed_rpm'), row.get('torque_nm'), row.get('tool_wear_min'), row.get('type'), 'NA', f"{row.get('failure_prob'):.4f}", '', ''])
 
 def run_retrain():
-    # Llama la función main del módulo de entrenamiento
-    try:
-        # Ejecutar en hilo para no bloquear la UI
-        from threading import Thread
-        t = Thread(target=train_module.main, daemon=True)
-        t.start()
-    except Exception as e:
-        st.error(f"Error en reentrenamiento: {e}")
+    # Reentrenamiento deshabilitado por requerimiento del proyecto
+    st.info('El reentrenamiento está deshabilitado. El modelo se entrena una sola vez.')
 
 
 def save_row_to_additional(df_row: pd.DataFrame, prefix: str = 'augmented_manual') -> str:
@@ -516,12 +572,7 @@ def main():
     except Exception:
         # st.session_state may not be available outside of Streamlit runtime
         pass
-    # Automatic re-training is enforced (no user toggle) — default threshold 1
-    try:
-        st.session_state.auto_retrain_enabled = True
-        st.session_state.retrain_threshold = 1
-    except Exception:
-        pass
+    # Reentrenamiento deshabilitado: no hay bandera ni umbral
 
     base_df = load_dataset()
     def dyn_range(col, pad=0.05):
@@ -542,7 +593,7 @@ def main():
     # Check if there's a pending prediction to disable inputs
     has_pending_prediction = st.session_state.get('last_prediction_data') is not None
     if has_pending_prediction:
-        st.sidebar.warning('Confirma el feedback de la predicción actual para modificar parámetros.')
+        st.sidebar.warning('⚠️ Confirma el feedback de la predicción actual para modificar parámetros.')
     # Use number_input instead of sliders to allow values beyond dataset bounds
     air_temp = st.sidebar.number_input('Temperatura ambiente [K]', value=300.0, step=0.1, format="%.1f", disabled=has_pending_prediction)
     process_temp = st.sidebar.number_input('Temperatura de proceso [K]', value=310.0, step=0.1, format="%.1f", disabled=has_pending_prediction)
@@ -580,7 +631,7 @@ def main():
         # Disable prediction button if there's a pending prediction without feedback
         has_pending_prediction = st.session_state.get('last_prediction_data') is not None
         if has_pending_prediction:
-            st.info('Debes confirmar el feedback de la predicción actual antes de calcular una nueva o modificar parámetros.')
+            st.info('⚠️ Debes confirmar el feedback de la predicción actual antes de calcular una nueva o modificar parámetros.')
         
         if st.button('Calcular Predicción y Recomendaciones', disabled=has_pending_prediction):
             st.session_state.feedback_given = False
@@ -594,8 +645,9 @@ def main():
                 'type': prod_type
             }
             pred, prob = predict_instance(model, data)
+            prob_cal = calibrated_probability(data, prob, k_neighbors=25, alpha=0.7)
             now_ts = pd.Timestamp.utcnow()
-            st.session_state.last_prediction_data = {**data, 'pred': int(pred), 'prob': float(prob), 'prediction_timestamp': now_ts}
+            st.session_state.last_prediction_data = {**data, 'pred': int(pred), 'prob': float(prob), 'prob_cal': float(prob_cal), 'prediction_timestamp': now_ts}
             log_prediction(
                 data={**data, 'prediction_timestamp': now_ts},
                 prob=float(prob),
@@ -609,15 +661,16 @@ def main():
         if st.session_state.get('last_prediction_data') is not None:
             data_view = st.session_state.get('last_prediction_data')
             prob_v = float(data_view.get('prob', 0.0))
+            prob_cal_v = float(data_view.get('prob_cal', prob_v))
             pred_v = int(data_view.get('pred', 0))
             st.subheader('Resultado de Predicción')
-            risk_label = 'ALTO' if prob_v>=0.6 else ('MODERADO' if prob_v>=0.3 else 'BAJO')
-            st.markdown(f"### Riesgo de fallo: **{risk_label}** - **{prob_v:.2f}**")
+            risk_label = 'ALTO' if prob_cal_v>=0.6 else ('MODERADO' if prob_cal_v>=0.3 else 'BAJO')
+            st.markdown(f"### Riesgo de fallo: **{risk_label}** - **{prob_cal_v:.2f}**")
             st.markdown(f"Modelo seleccionado: **{best_model_name()}**")
 
             gauge = go.Figure(go.Indicator(
                 mode="gauge+number",
-                value=prob_v*100,
+                value=prob_cal_v*100,
                 title={'text': 'Índice de Riesgo (%)'},
                 gauge={
                     'axis': {'range': [0,100]},
@@ -626,7 +679,7 @@ def main():
                         {'range':[30,60],'color':'#ffb300'},
                         {'range':[60,100],'color':'#c62828'}
                     ],
-                    'threshold': {'line': {'color': '#c62828', 'width': 4}, 'thickness': 0.75, 'value': prob_v*100}
+                    'threshold': {'line': {'color': '#c62828', 'width': 4}, 'thickness': 0.75, 'value': prob_cal_v*100}
                 }
             ))
             st.plotly_chart(gauge, use_container_width=True)
@@ -715,20 +768,10 @@ def main():
                         # Clear active prediction UI and avoid re-logging the same prediction
                         st.session_state.last_prediction_data = None
                         st.session_state.suppress_logging = True
-                        try:
-                            preds_df = load_predictions(PRED_LOG)
-                            combined = combine_predictions_with_feedback(preds_df, None)
-                            if combined is not None:
-                                out = save_labeled_data(combined, os.path.join(os.path.dirname(__file__), '..', 'data', 'additional'))
-                                if out is not None:
-                                    out_path, new_rows = out
-                                    if new_rows >= 1:
-                                        run_retrain()
-                        except Exception as e:
-                            st.warning(f'No se pudo combinar/guardar feedback: {e}')
+                        # No combinar feedback ni reentrenar; solo registrar y continuar
                         st.rerun()
                     else:
-                        st.error('No hay predicción activa. Primero realiza una predicción.')
+                        st.error('⚠️ No hay predicción activa. Primero realiza una predicción.')
             with col_fb2:
                 if st.button('❌ Sí ocurrió fallo', key='fail', disabled=feedback_given):
                     pred_stored = st.session_state.get('last_prediction_data')
@@ -744,20 +787,10 @@ def main():
                         # Clear active prediction UI and avoid re-logging the same prediction
                         st.session_state.last_prediction_data = None
                         st.session_state.suppress_logging = True
-                        try:
-                            preds_df = load_predictions(PRED_LOG)
-                            combined = combine_predictions_with_feedback(preds_df, None)
-                            if combined is not None:
-                                out = save_labeled_data(combined, os.path.join(os.path.dirname(__file__), '..', 'data', 'additional'))
-                                if out is not None:
-                                    out_path, new_rows = out
-                                    if new_rows >= 1:
-                                        run_retrain()
-                        except Exception as e:
-                            st.warning(f'No se pudo combinar/guardar feedback: {e}')
+                        # No combinar feedback ni reentrenar; solo registrar y continuar
                         st.rerun()
                     else:
-                        st.error('No hay predicción activa. Primero realiza una predicción.')
+                        st.error('⚠️ No hay predicción activa. Primero realiza una predicción.')
 
             if st.button('Borrar predicción actual', key='clear_pred'):
                 try:
@@ -849,7 +882,7 @@ def main():
             """)
         
         if st.session_state.get('last_prediction_data', None) is None:
-            st.warning('Primero realiza una predicción en la pestaña "Predicción" para generar explicaciones SHAP.')
+            st.warning('⚠️ Primero realiza una predicción en la pestaña "Predicción" para generar explicaciones SHAP.')
         else:
             # Mostrar parámetros de la última predicción
             st.markdown('#### Parámetros de la Predicción Actual')
@@ -1128,6 +1161,7 @@ def main():
             st.info('No existe archivo de historial todavía. Genere una predicción en la pestaña "Predicción" para crear el log.')
 
 if __name__ == '__main__':
+    print("Ejecute con: streamlit run app/streamlit_app.py")
     main()
 
 # Estilos CSS para tarjetas
