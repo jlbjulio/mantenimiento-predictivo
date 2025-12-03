@@ -77,7 +77,6 @@ Después de cada predicción y operación real:
    - Clic en **"✅ No hubo fallo"** si operación exitosa
    - Clic en **"🚨 Si hubo fallo"** si ocurrió un fallo
 2. Sistema actualiza automáticamente `logs/predicciones.csv` con valor de `Machine failure` (0 o 1)
-3. Reentrenamiento automático se ejecuta en segundo plano
 
 ### Mejora Continua del Modelo
 
@@ -86,17 +85,8 @@ Después de cada predicción y operación real:
 ```
 1. Hacer predicción → se guarda en logs/predicciones.csv con Machine failure = None
 2. Marcar feedback → actualiza misma fila con Machine failure = 0 o 1
-3. Sistema automático combina y reentrena en segundo plano
 ```
 
-El sistema automáticamente:
-
-- Combina predicciones con feedback (solo filas con `Machine failure` definido)
-- Genera dataset etiquetado en `data/additional/feedback_labeled_*.csv` (14 columnas)
-- Entrena con datos originales + feedback real
-- Crea nueva versión timestamped en `models/versions/`
-- Guarda metadata completa (AUC, fecha, muestras)
-- **NO requiere operaciones manuales** - todo es automático
 
 ## Próximas Mejoras
 
