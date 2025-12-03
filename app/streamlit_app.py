@@ -35,7 +35,7 @@ from src.ml import train as train_module
 try:
     from src.ml.combine_feedback import load_predictions, load_feedback, combine_predictions_with_feedback, save_labeled_data, upgrade_pred_log
 except Exception:
-    # Be tolerant if newer helper not available (e.g. on older deployments); fallback gracefully
+    # Permitir fallback si el helper más reciente no está disponible (ej.: despliegues antiguos)
     from src.ml.combine_feedback import load_predictions, load_feedback, combine_predictions_with_feedback, save_labeled_data
     upgrade_pred_log = None
 
@@ -44,9 +44,7 @@ MODEL_PATH = os.path.join(MODELS_DIR, 'failure_binary_model.joblib')
 MULTI_PATH = os.path.join(MODELS_DIR, 'failure_multilabel_models.joblib')
 METRICS_PATH = os.path.join(MODELS_DIR, 'failure_binary_metrics.joblib')
 
-#########################
-# Utilidades y helpers (antes de main para evitar NameError)
-#########################
+# Utilidades y helpers (definidos antes de main para evitar NameError)
 import csv
 import shutil
 from datetime import datetime
@@ -54,7 +52,7 @@ from datetime import datetime
 LOG_PATH = os.path.join(ROOT_DIR, 'logs')
 os.makedirs(LOG_PATH, exist_ok=True)
 PRED_LOG = os.path.join(LOG_PATH, 'predicciones.csv')
-# Feedback handled inside pred CSV now; keep FEEDBACK_LOG for compatibility but we won't write to it
+# El feedback ahora se maneja en predicciones.csv; mantener FEEDBACK_LOG por compatibilidad pero no se escribe en él
 FEEDBACK_LOG = os.path.join(LOG_PATH, 'feedback.csv')
 
 @st.cache_resource
@@ -65,7 +63,7 @@ def load_models():
 
 def prepare_feature_row(user_data: dict) -> pd.DataFrame:
     base_df = load_dataset()
-    # Use canonical feature list to ensure exact same pipeline columns
+    # Usar lista canónica de características para mantener columnas consistentes con el pipeline
     feature_cols = [
         'air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min',
         'type','uid','product_id','delta_temp_k','omega_rad_s','power_w','wear_pct'
@@ -78,14 +76,13 @@ def prepare_feature_row(user_data: dict) -> pd.DataFrame:
         'torque_nm': user_data['torque_nm'],
         'tool_wear_min': user_data['tool_wear_min'],
         'type': user_data['type'],
-        # Technical identifiers are not used by the model (explicitly excluded in preprocessor)
+        # Identificadores técnicos no son usados por el modelo (se excluyen en el preprocesador)
         'uid': 0,
         'product_id': f"{user_data['type']}_SIM"
     })
     df = pd.DataFrame([template])
     df = engineer_features(df)
-    # Reordenar
-    # Ensure all canonical columns present
+    # Reordenar y asegurar que todas las columnas canónicas estén presentes
     for col in feature_cols:
         if col not in df.columns:
             df[col] = None
@@ -98,11 +95,11 @@ def _to_original_schema(df_row: pd.DataFrame, base_file: str):
     This uses the header of the base CSV as the target column names and maps common normalized names back.
     """
     try:
-        # read header of base file
+        # Leer el encabezado del archivo base
         import pandas as pd
         head = pd.read_csv(base_file, nrows=0)
         orig_cols = list(head.columns)
-        # Build mapping original -> normalized
+        # Construir mapeo: original -> normalizado
         mapping = {
             'UDI': 'uid',
             'Product ID': 'product_id',
@@ -119,9 +116,9 @@ def _to_original_schema(df_row: pd.DataFrame, base_file: str):
             'OSF': 'osf',
             'RNF': 'rnf'
         }
-        # build output dict matching orig_cols using scalar values
+        # Construir dict de salida que coincide con orig_cols usando valores escalares
         out = {}
-        # Handle df_row being either a DataFrame with one row or a Series
+        # Manejar df_row que puede ser un DataFrame de una sola fila o una Series
         if isinstance(df_row, pd.DataFrame):
             if df_row.shape[0] >= 1:
                 row_series = df_row.iloc[0]
@@ -130,8 +127,8 @@ def _to_original_schema(df_row: pd.DataFrame, base_file: str):
         else:
             row_series = df_row
         for c in orig_cols:
-            norm = mapping.get(c, c)  # map original to normalized
-            # Prefer normalized name
+            norm = mapping.get(c, c)  # mapear original a normalizado
+            # Preferir el nombre normalizado
             val = row_series.get(norm, None) if norm in row_series.index else row_series.get(c, None)
             if pd.notna(val):
                 out[c] = val
@@ -139,7 +136,7 @@ def _to_original_schema(df_row: pd.DataFrame, base_file: str):
                 out[c] = ''
         return out
     except Exception:
-        # fallback: return the canonical row as dict, unmatched columns left empty
+        # En fallback: devolver la fila canónica como dict; columnas no coincidentes quedan vacías
         try:
             return df_row.to_dict(orient='records')[0]
         except Exception:
@@ -147,24 +144,24 @@ def _to_original_schema(df_row: pd.DataFrame, base_file: str):
 
 
 def _align_input_with_pipeline(df_row: pd.DataFrame, pipeline):
-    """Ensure df_row has columns expected by the pipeline's preprocessor (or pipeline.feature_names_in_)
-    Adds missing columns with NA and reorders columns to match expected order.
+    """Asegura que df_row tenga las columnas esperadas por el preprocesador del pipeline (o pipeline.feature_names_in_).
+    Añade columnas faltantes con NA y reordena las columnas para coincidir con el orden esperado.
     """
     import pandas as pd
     try:
         pre = pipeline.named_steps.get('pre', None)
         expected_cols = []
         if pre is not None and hasattr(pre, 'transformers_'):
-            # Attempt to extract canonical input columns from the transformer's selectors
+            # Intentar extraer columnas de entrada canónicas desde los selectores del transformer
             try:
                 for _name, _tr, _cols in pre.transformers_:
                     if _cols is None:
                         continue
-                    # slice
+                    
                     if isinstance(_cols, slice):
                         expected_cols.extend(list(df_row.columns[_cols]))
                         continue
-                    # array/list or tuple of indices/column names
+                    
                     try:
                         iter_cols = list(_cols)
                         if len(iter_cols) > 0 and isinstance(iter_cols[0], int):
@@ -178,7 +175,7 @@ def _align_input_with_pipeline(df_row: pd.DataFrame, pipeline):
                         expected_cols.append(_cols)
             except Exception:
                 expected_cols = []
-        # Prefer pre.feature_names_in_ to preserve exact input ordering (sklearn checks this)
+        # Preferir pre.feature_names_in_ para preservar el orden exacto de entrada (sklearn verifica esto)
         if pre is not None and hasattr(pre, 'feature_names_in_'):
             expected_cols = list(pre.feature_names_in_)
         elif not expected_cols:
@@ -198,19 +195,19 @@ def _align_input_with_pipeline(df_row: pd.DataFrame, pipeline):
     ]
     for c in expected_cols:
         if c not in df_row.columns:
-            # Default numeric-like columns to np.nan, others to empty string
+            # Columnas numéricas por defecto a np.nan, otras a cadena vacía
             if c in CANONICAL_NUMERIC or 'prob' in c.lower():
                 df_row[c] = np.nan
             else:
                 df_row[c] = ''
-    # Reorder, plus keep any extra cols at end
+    # Reordenar y mantener cualquier columna extra al final
     extras = [c for c in df_row.columns if c not in expected_cols]
     ordered_cols = expected_cols + extras
     return df_row[ordered_cols]
 
 def predict_instance(model, user_data: dict):
     df_row = prepare_feature_row(user_data)
-    # Ensure df_row contains columns expected by model pipeline (old models may expect additional log fields)
+    # Asegurar que df_row contenga las columnas requeridas por el pipeline del modelo (modelos antiguos pueden requerir campos adicionales)
     try:
         df_row_aligned = _align_input_with_pipeline(df_row, model)
     except Exception:
@@ -220,9 +217,9 @@ def predict_instance(model, user_data: dict):
     return pred, prob
 
 def calibrated_probability(user_data: dict, model_prob: float, k_neighbors: int = 25, alpha: float = 0.7) -> float:
-    """Blend model probability with empirical failure rate from similar historical cases in logs/predicciones.csv.
-    - No retraining; uses existing labeled feedback (Machine failure) only.
-    - alpha controls trust in model vs empirical (alpha closer to 1 trusts model more).
+    """Mezcla la probabilidad del modelo con la tasa empírica de fallo calculada a partir de casos históricos similares en logs/predicciones.csv.
+    - No hay reentrenamiento; sólo usa feedback etiquetado existente ('Machine failure').
+    - alpha controla la confianza entre modelo y empírico (alpha cercano a 1 confía más en el modelo).
     """
     try:
         if not os.path.exists(PRED_LOG):
@@ -236,7 +233,7 @@ def calibrated_probability(user_data: dict, model_prob: float, k_neighbors: int 
             return float(model_prob)
         # Build feature matrix
         feats = ['air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min']
-        # Normalize numeric features to comparable scales
+        # Normalizar características numéricas a escalas comparables
         def _norm(col, x):
             try:
                 c = valid[col].astype(float)
@@ -253,11 +250,11 @@ def calibrated_probability(user_data: dict, model_prob: float, k_neighbors: int 
         for idx, row in valid.iterrows():
             try:
                 rn = {f: _norm(f, float(row.get(f))) for f in feats}
-                # Euclidean on normalized features
+                # Distancia euclidiana sobre características normalizadas
                 dist = 0.0
                 for f in feats:
                     dist += (qn[f] - rn[f])**2
-                # Type penalty if different
+                # Penalización por tipo si es diferente
                 type_pen = 0.0 if str(row.get('type')) == str(user_data.get('type')) else 0.15
                 dists.append((dist + type_pen, float(row.get('Machine failure', 0.0))))
             except Exception:
@@ -268,14 +265,28 @@ def calibrated_probability(user_data: dict, model_prob: float, k_neighbors: int 
         neighbors = dists[:max(1, k_neighbors)]
         empirical = sum([mf for _, mf in neighbors]) / len(neighbors)
         calib = float(alpha) * float(model_prob) + (1.0 - float(alpha)) * float(empirical)
-        # Clamp to [0.0, 1.0]
+        # Limitar a [0.0, 1.0]
         calib = max(0.0, min(1.0, calib))
         return calib
     except Exception:
         return float(model_prob)
 
 def best_model_name():
-    # Proyecto revisado: el mejor modelo queda fijado en Gradient Boosting
+    try:
+        if os.path.exists(METRICS_PATH):
+            metrics = joblib.load(METRICS_PATH)
+            aucs = {}
+            if isinstance(metrics, dict) and 'aucs' in metrics:
+                aucs = metrics['aucs']
+            elif isinstance(metrics, dict):
+                for model_name, model_metrics in metrics.items():
+                    if isinstance(model_metrics, dict) and 'auc' in model_metrics:
+                        aucs[model_name] = model_metrics['auc']
+            if aucs:
+                best = max(aucs.items(), key=lambda x: x[1])
+                return best[0]
+    except Exception:
+        pass
     return 'GradientBoosting'
 
 def load_metrics_status():
@@ -307,7 +318,7 @@ def load_metrics_status():
     return status
 
 def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = None, feedback_timestamp: pd.Timestamp = None):
-    # Safety guard: allow suppressing writes during UI actions like "Borrar predicción"
+    # Protección: permitir suprimir escrituras durante acciones UI como "Borrar predicción"
     try:
         if st.session_state.get('suppress_logging', False):
             return
@@ -315,7 +326,7 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
         pass
     header = ['timestamp','air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob','Machine failure','feedback_timestamp']
     write_header = not os.path.exists(PRED_LOG)
-    # Ensure CSV header includes new columns; if not, add missing columns without rewriting valid data
+    # Asegurar que el encabezado CSV incluya las columnas nuevas; si faltan, agregarlas sin reescribir los datos existentes
     full_header = ['timestamp','air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob','Machine failure','feedback_timestamp']
     if os.path.exists(PRED_LOG):
         try:
@@ -331,10 +342,10 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
                 df_old.to_csv(PRED_LOG, index=False, columns=full_header)
                 write_header = False
         except Exception:
-            # best effort; ignore
+            # Mejor esfuerzo; ignorar errores
             pass
     def _write(ts):
-        # Normalize timestamps to ISO seconds to avoid parse issues
+        # Normalizar timestamps a ISO segundos para evitar problemas de parseo
         try:
             ts_norm = pd.to_datetime(ts, errors='coerce')
             if pd.notna(ts_norm):
@@ -356,8 +367,8 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
             if write_header:
                 w.writerow(header)
             w.writerow([ts, data['air_temp_k'], data['process_temp_k'], data['rot_speed_rpm'], data['torque_nm'], data['tool_wear_min'], data['type'], pred, f"{prob:.4f}", machine_failure if machine_failure is not None else '', fb_ts])
-    # Accept timestamp override if provided
-    # deduplicate/update: if a row with the same prediction timestamp (string exact) already exists, update it
+    # Aceptar timestamp proporcionado si existe
+    # deduplicate/update: si existe una fila con el mismo timestamp de predicción (cadena exacta), actualizarla
     try:
         if os.path.exists(PRED_LOG):
             existing = pd.read_csv(PRED_LOG)
@@ -368,21 +379,21 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
                     if pd.isna(provided_dt):
                         raise ValueError('Invalid prediction timestamp')
                     provided_str = provided_dt.strftime('%Y-%m-%dT%H:%M:%S')
-                    # First attempt: exact string match on timestamp
+                    # Primer intento: coincidencia exacta de cadena en timestamp
                     mask = (existing['timestamp'].astype(str) == provided_str)
                     if not mask.any():
-                        # Fallback: match rows with empty Machine failure and identical feature values
+                        # En fallback: buscar filas con 'Machine failure' vacío y valores de características idénticos
                         feature_cols = ['air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob']
                         try:
                             for col in feature_cols:
                                 if col == 'prob':
-                                    # Prob stored as string formatted to 4 decimals; compare rounding
+                                    # Prob almacenada como cadena con 4 decimales; comparar redondeo
                                     prob_str = f"{prob:.4f}" if prob is not None else ''
                                     mask_feat = (existing[col].astype(str) == prob_str)
                                 else:
                                     mask_feat = (existing[col].astype(str) == str(data.get(col if col!='pred' and col!='prob' else col)))
                                 mask = mask & mask_feat if 'mask' in locals() and len(mask) == len(existing) else mask_feat
-                            # Only keep candidates with empty Machine failure
+                            # Mantener solo candidatos con 'Machine failure' vacío
                             if 'Machine failure' in existing.columns:
                                 mask = mask & (existing['Machine failure'].astype(str).isin(['','nan']))
                         except Exception:
@@ -410,11 +421,11 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
         _write(pd.Timestamp.utcnow())
     
 
-# Simple version in use; advanced removal logic removed per user request
+# Versión simplificada para eliminación: borra la última fila del log de predicciones
  
 
 def remove_last_prediction_row() -> bool:
-    """Simplest path: delete the last row in predicciones.csv (if any)."""
+    """Eliminar la última fila registrada en predicciones.csv (si existe)."""
     try:
         if not os.path.exists(PRED_LOG):
             return False
@@ -429,8 +440,8 @@ def remove_last_prediction_row() -> bool:
 
 
 def ensure_pred_log_has_history(model, count: int = 500):
-    """Seed predicciones.csv with entries from base dataset to create initial history.
-    Only seeds when file doesn't exist or has few rows (< count).
+    """Sembrar predicciones.csv con entradas del dataset base para crear historial inicial.
+    Sólo se semilla si el archivo no existe o tiene pocas filas (< count).
     """
     try:
         import numpy as np
@@ -460,7 +471,6 @@ def ensure_pred_log_has_history(model, count: int = 500):
                 prob = 0.0
                 pred = 0
             rows.append([pd.Timestamp.utcnow(), data['air_temp_k'], data['process_temp_k'], data['rot_speed_rpm'], data['torque_nm'], data['tool_wear_min'], data['type'], pred, f"{prob:.4f}"])
-        # write in bulk
         write_header = not os.path.exists(PRED_LOG)
         header = ['timestamp','air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob']
         with open(PRED_LOG, 'a', newline='') as f:
@@ -474,16 +484,16 @@ def ensure_pred_log_has_history(model, count: int = 500):
         return
 
 def log_feedback(timestamp: str, actual_failure: int):
-    """Backward-compatible: write feedback directly in predicciones.csv for the given prediction timestamp.
-    If a prediction entry doesn't exist, create it with missing prediction values.
+    """Compatibilidad hacia atrás: escribir feedback directamente en predicciones.csv para el timestamp dado.
+    Si no existe una entrada para la predicción, crear una con campos de predicción vacíos.
     """
     try:
-        # Attempt to find existing prediction row and update it
+        # Intento de localizar una fila de predicción existente y actualizarla
         if os.path.exists(PRED_LOG):
             df = pd.read_csv(PRED_LOG)
             ts = str(timestamp)
             if 'timestamp' in df.columns and ts in df['timestamp'].astype(str).tolist():
-                # Ensure text columns are dtype object to avoid dtype deprecation warnings
+                        # Asegurar que columnas de texto sean dtype object para evitar warnings de deprecación
                 for _c in ['feedback_timestamp']:
                     if _c in df.columns:
                         try:
@@ -524,7 +534,7 @@ def run_retrain():
 
 
 def save_row_to_additional(df_row: pd.DataFrame, prefix: str = 'augmented_manual') -> str:
-    """Save a single row to data/additional/<prefix>_<timestamp>.csv and return path."""
+    """Guardar una fila en data/additional/<prefix>_<timestamp>.csv y devolver la ruta generada."""
     try:
         ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
         out_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'additional')
@@ -538,8 +548,8 @@ def save_row_to_additional(df_row: pd.DataFrame, prefix: str = 'augmented_manual
 
 
 def append_row_to_base(df_row: pd.DataFrame) -> str:
-    """Append row to base ai4i2020.csv with a timestamped backup; return backup path.
-    Returns backup path on success, None otherwise.
+    """Añadir fila al ai4i2020.csv base con copia de seguridad con marca de tiempo; devolver la ruta del backup.
+    Devuelve la ruta del backup en caso de éxito, None en caso contrario.
     """
     try:
         base_path = find_dataset()
@@ -547,10 +557,9 @@ def append_row_to_base(df_row: pd.DataFrame) -> str:
         shutil.copy2(base_path, backup_path)
         # Convert df_row to original schema
         rec = _to_original_schema(df_row.iloc[0], base_path)
-        # Append as a single-line CSV (keeping original header order)
+        # Añadir como una fila única al CSV (manteniendo el orden original del encabezado)
         import pandas as pd
         base_df = pd.read_csv(base_path, dtype=str)
-        # create a new row with same columns
         new_row = {c: rec.get(c, '') for c in base_df.columns}
         new_row_df = pd.DataFrame([new_row], columns=base_df.columns)
         base_df = pd.concat([base_df, new_row_df], ignore_index=True)
@@ -582,7 +591,7 @@ def main():
         span = mx - mn
         return float(mn - span*pad), float(mx + span*pad)
 
-    # Keep dyn_range for reference but do not limit inputs by dataset bounds
+    # Mantener dyn_range como referencia; no limitar las entradas a los límites del dataset
     a_min, a_max = dyn_range('air_temp_k')
     p_min, p_max = dyn_range('process_temp_k')
     r_min, r_max = dyn_range('rot_speed_rpm')
@@ -594,7 +603,7 @@ def main():
     has_pending_prediction = st.session_state.get('last_prediction_data') is not None
     if has_pending_prediction:
         st.sidebar.warning('⚠️ Confirma el feedback de la predicción actual para modificar parámetros.')
-    # Use number_input instead of sliders to allow values beyond dataset bounds
+    # Usar number_input en lugar de sliders para permitir valores fuera de los límites del dataset
     air_temp = st.sidebar.number_input('Temperatura ambiente [K]', value=300.0, step=0.1, format="%.1f", disabled=has_pending_prediction)
     process_temp = st.sidebar.number_input('Temperatura de proceso [K]', value=310.0, step=0.1, format="%.1f", disabled=has_pending_prediction)
     rot_speed = st.sidebar.number_input('Velocidad de rotación [rpm]', value=1500.0, step=1.0, format="%.0f", disabled=has_pending_prediction)
@@ -1002,7 +1011,7 @@ def main():
                         except Exception:
                             return x
                     hist['timestamp'] = hist['timestamp'].apply(_drop_tz)
-                    # Ensure prob is numeric
+                    # Asegurarse de que 'prob' sea numérico
                     hist['prob'] = pd.to_numeric(hist.get('prob', pd.Series([])), errors='coerce')
                     hist = hist.sort_values('timestamp')
                     
