@@ -5,101 +5,59 @@ import os
 import sys
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import threading
 import time
 import altair as alt
-
-# Configuración de página (debe ser lo primero)
-st.set_page_config(
-    page_title="Mantenimiento Predictivo AI",
-    page_icon="🔧",
-    layout="wide",
-    initial_sidebar_state="expanded",
-    menu_items={
-        'Get Help': 'https://github.com/jlbjulio/mantenimiento-predictivo',
-        'Report a bug': 'https://github.com/jlbjulio/mantenimiento-predictivo/issues',
-        'About': '# Sistema Inteligente de Mantenimiento Predictivo\nVersion 1.0 - Nov 2025'
-    }
-)
-
-# Asegura importación del paquete src
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from src.data.data_loader import engineer_features, normalize_columns, load_dataset, find_dataset
-from src.data.data_loader import augment_dataset
-from src.ml.recommendation import generate_recommendations
-from src.ml.shap_utils import shap_for_instance
-from src.ml import train as train_module
-try:
-    from src.ml.combine_feedback import load_predictions, load_feedback, combine_predictions_with_feedback, save_labeled_data, upgrade_pred_log
-except Exception:
-    # Permitir fallback si el helper más reciente no está disponible (ej.: despliegues antiguos)
-    from src.ml.combine_feedback import load_predictions, load_feedback, combine_predictions_with_feedback, save_labeled_data
-    upgrade_pred_log = None
-
-MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
-MODEL_PATH = os.path.join(MODELS_DIR, 'failure_binary_model.joblib')
-MULTI_PATH = os.path.join(MODELS_DIR, 'failure_multilabel_models.joblib')
-METRICS_PATH = os.path.join(MODELS_DIR, 'failure_binary_metrics.joblib')
-
-# Utilidades y helpers (definidos antes de main para evitar NameError)
 import csv
 import shutil
 from datetime import datetime
 
-LOG_PATH = os.path.join(ROOT_DIR, 'logs')
-os.makedirs(LOG_PATH, exist_ok=True)
-PRED_LOG = os.path.join(LOG_PATH, 'predicciones.csv')
-# El feedback ahora se maneja en predicciones.csv; mantener FEEDBACK_LOG por compatibilidad pero no se escribe en él
-FEEDBACK_LOG = os.path.join(LOG_PATH, 'feedback.csv')
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
-@st.cache_resource
-def load_models():
-    model = joblib.load(MODEL_PATH)
-    multi = joblib.load(MULTI_PATH) if os.path.exists(MULTI_PATH) else None
-    return model, multi
+st.set_page_config(
+    page_title="Automatas - Mantenimiento Predictivo para Centros de Mecanizado",
+    page_icon="🔧",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={
+        'Get Help': 'https://github.com/jlbjulio/Automatas',
+        'Report a bug': 'https://github.com/jlbjulio/Automatas/issues',
+        'About': '# Automatas - Mantenimiento Predictivo para Centros de Mecanizado\nVersion 1.0 - Nov 2025'
+    }
+)
 
-def prepare_feature_row(user_data: dict) -> pd.DataFrame:
-    base_df = load_dataset()
-    # Usar lista canónica de características para mantener columnas consistentes con el pipeline
-    feature_cols = [
-        'air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min',
-        'type','uid','product_id','delta_temp_k','omega_rad_s','power_w','wear_pct'
-    ]
-    template = {c: None for c in feature_cols}
-    template.update({
-        'air_temp_k': user_data['air_temp_k'],
-        'process_temp_k': user_data['process_temp_k'],
-        'rot_speed_rpm': user_data['rot_speed_rpm'],
-        'torque_nm': user_data['torque_nm'],
-        'tool_wear_min': user_data['tool_wear_min'],
-        'type': user_data['type'],
-        # Identificadores técnicos no son usados por el modelo (se excluyen en el preprocesador)
-        'uid': 0,
-        'product_id': f"{user_data['type']}_SIM"
-    })
-    df = pd.DataFrame([template])
-    df = engineer_features(df)
-    # Reordenar y asegurar que todas las columnas canónicas estén presentes
-    for col in feature_cols:
-        if col not in df.columns:
-            df[col] = None
-    df = df[feature_cols]
-    return df
+MODEL_PATH = 'models/failure_binary_model.joblib'
+METRICS_PATH = 'models/failure_binary_metrics.joblib'
+PRED_LOG = 'logs/predicciones.csv'
+MULTILABEL_MODEL_PATH = 'models/failure_multilabel_models.joblib'
+MULTILABEL_METRICS_PATH = 'models/failure_multilabel_metrics.joblib'
+
+from src.data.data_loader import engineer_features, normalize_columns, load_dataset, find_dataset
+from src.ml.comparative_analysis import (
+    analyze_by_product_type, calculate_correlation_matrix, calculate_failure_rates_by_bins,
+    create_benchmark_comparison, create_correlation_heatmap,
+    create_failure_heatmap, create_3d_scatter
+)
 
 
 def _to_original_schema(df_row: pd.DataFrame, base_file: str):
-    """Convert a canonical (normalized) df_row to the original ai4i2020.csv schema, if possible.
-    This uses the header of the base CSV as the target column names and maps common normalized names back.
+    """Convierte una fila con esquema normalizado al esquema original de ai4i2020.csv.
+    
+    Esta función mapea columnas normalizadas (ej: air_temp_k) a las columnas originales del dataset
+    (ej: 'Air temperature [K]'). Es útil para mantener compatibilidad con el dataset base.
+    
+    Args:
+        df_row (pd.DataFrame): Fila de datos con columnas normalizadas o Series
+        base_file (str): Ruta al archivo CSV base para obtener esquema original
+    
+    Returns:
+        dict: Diccionario con columnas del esquema original mapeadas desde los valores de entrada
     """
     try:
-        # Leer el encabezado del archivo base
         import pandas as pd
         head = pd.read_csv(base_file, nrows=0)
         orig_cols = list(head.columns)
-        # Construir mapeo: original -> normalizado
         mapping = {
             'UDI': 'uid',
             'Product ID': 'product_id',
@@ -116,9 +74,7 @@ def _to_original_schema(df_row: pd.DataFrame, base_file: str):
             'OSF': 'osf',
             'RNF': 'rnf'
         }
-        # Construir dict de salida que coincide con orig_cols usando valores escalares
         out = {}
-        # Manejar df_row que puede ser un DataFrame de una sola fila o una Series
         if isinstance(df_row, pd.DataFrame):
             if df_row.shape[0] >= 1:
                 row_series = df_row.iloc[0]
@@ -127,8 +83,7 @@ def _to_original_schema(df_row: pd.DataFrame, base_file: str):
         else:
             row_series = df_row
         for c in orig_cols:
-            norm = mapping.get(c, c)  # mapear original a normalizado
-            # Preferir el nombre normalizado
+            norm = mapping.get(c, c)
             val = row_series.get(norm, None) if norm in row_series.index else row_series.get(c, None)
             if pd.notna(val):
                 out[c] = val
@@ -136,7 +91,6 @@ def _to_original_schema(df_row: pd.DataFrame, base_file: str):
                 out[c] = ''
         return out
     except Exception:
-        # En fallback: devolver la fila canónica como dict; columnas no coincidentes quedan vacías
         try:
             return df_row.to_dict(orient='records')[0]
         except Exception:
@@ -144,15 +98,24 @@ def _to_original_schema(df_row: pd.DataFrame, base_file: str):
 
 
 def _align_input_with_pipeline(df_row: pd.DataFrame, pipeline):
-    """Asegura que df_row tenga las columnas esperadas por el preprocesador del pipeline (o pipeline.feature_names_in_).
-    Añade columnas faltantes con NA y reordena las columnas para coincidir con el orden esperado.
+    """Alinea las columnas de entrada con las esperadas por el preprocesador del pipeline.
+    
+    Verifica que el DataFrame de entrada tenga todas las columnas requeridas por el pipeline.
+    Añade columnas faltantes con valores NA o cadenas vacías (según el tipo) y reordena
+    las columnas para coincidir exactamente con el orden esperado por el modelo.
+    
+    Args:
+        df_row (pd.DataFrame): DataFrame con características de entrada
+        pipeline: Pipeline de scikit-learn que contiene el preprocesador
+    
+    Returns:
+        pd.DataFrame: DataFrame con columnas alineadas y ordenadas según el pipeline
     """
     import pandas as pd
     try:
         pre = pipeline.named_steps.get('pre', None)
         expected_cols = []
         if pre is not None and hasattr(pre, 'transformers_'):
-            # Intentar extraer columnas de entrada canónicas desde los selectores del transformer
             try:
                 for _name, _tr, _cols in pre.transformers_:
                     if _cols is None:
@@ -175,7 +138,6 @@ def _align_input_with_pipeline(df_row: pd.DataFrame, pipeline):
                         expected_cols.append(_cols)
             except Exception:
                 expected_cols = []
-        # Preferir pre.feature_names_in_ para preservar el orden exacto de entrada (sklearn verifica esto)
         if pre is not None and hasattr(pre, 'feature_names_in_'):
             expected_cols = list(pre.feature_names_in_)
         elif not expected_cols:
@@ -195,19 +157,63 @@ def _align_input_with_pipeline(df_row: pd.DataFrame, pipeline):
     ]
     for c in expected_cols:
         if c not in df_row.columns:
-            # Columnas numéricas por defecto a np.nan, otras a cadena vacía
             if c in CANONICAL_NUMERIC or 'prob' in c.lower():
                 df_row[c] = np.nan
             else:
                 df_row[c] = ''
-    # Reordenar y mantener cualquier columna extra al final
     extras = [c for c in df_row.columns if c not in expected_cols]
     ordered_cols = expected_cols + extras
     return df_row[ordered_cols]
 
+def prepare_feature_row(user_data: dict) -> pd.DataFrame:
+    """Convierte parámetros de entrada de usuario en un DataFrame con características ingenieridas.
+    
+    Toma un diccionario con los 5 parámetros operativos básicos (temperatura, RPM, torque, desgaste, tipo)
+    y aplica ingeniería de características para generar nuevas columnas derivadas (delta térmico,
+    potencia, razones de desgaste, etc.) que se usan en el modelo de predicción.
+    
+    Args:
+        user_data (dict): Diccionario con claves: air_temp_k, process_temp_k, rot_speed_rpm, 
+                         torque_nm, tool_wear_min, type
+    
+    Returns:
+        pd.DataFrame: Una fila de datos con características originales e ingenieridas
+    """
+    import pandas as pd
+    import numpy as np
+    
+    # Crear fila con datos de entrada
+    df_row = pd.DataFrame([{
+        'air_temp_k': float(user_data.get('air_temp_k', 300.0)),
+        'process_temp_k': float(user_data.get('process_temp_k', 310.0)),
+        'rot_speed_rpm': float(user_data.get('rot_speed_rpm', 1500.0)),
+        'torque_nm': float(user_data.get('torque_nm', 40.0)),
+        'tool_wear_min': float(user_data.get('tool_wear_min', 50.0)),
+        'type': user_data.get('type', 'L'),
+    }])
+    
+    try:
+        df_row = engineer_features(df_row)
+    except Exception:
+        pass
+    
+    return df_row
+
 def predict_instance(model, user_data: dict):
+    """Realiza predicción de probabilidad de fallo para un conjunto de parámetros operativos.
+    
+    Prepara las características del usuario, alinea con el pipeline, y genera predicción binaria
+    con probabilidad asociada. Maneja alineación automática de columnas y érores en preprocesamiento.
+    
+    Args:
+        model: Modelo entrenado (pipeline con preprocesador y clasificador)
+        user_data (dict): Parámetros operativos del usuario
+    
+    Returns:
+        tuple: (predicción_binaria, probabilidad_fallo) donde predicción ∈ {0, 1} y 
+               probabilidad ∈ [0, 1]
+    """
     df_row = prepare_feature_row(user_data)
-    # Asegurar que df_row contenga las columnas requeridas por el pipeline del modelo (modelos antiguos pueden requerir campos adicionales)
     try:
         df_row_aligned = _align_input_with_pipeline(df_row, model)
     except Exception:
@@ -216,22 +222,63 @@ def predict_instance(model, user_data: dict):
     pred = model.predict(df_row_aligned)[0]
     return pred, prob
 
+
+def predict_modes_multilabel(multi_models, user_data: dict):
+    """Calcula probabilidades de cada tipo de fallo (TWF, HDF, PWF, OSF, RNF) usando modelos multilabel.
+    
+    Para cada modo de fallo se entrena un clasificador binario independiente. Esta función
+    invoca todos los clasificadores y retorna las probabilidades individuales para permitir
+    diagnóstico multimodal de las causas raíz del fallo.
+    
+    Args:
+        multi_models: Diccionario de modelos cargados {nombre_modo: modelo} o None
+        user_data (dict): Parámetros operativos del usuario
+    
+    Returns:
+        dict: Probabilidades por modo de fallo {MODO: probabilidad}, ej: {'TWF': 0.45, 'HDF': 0.12, ...}
+              Si multi_models es None, retorna dict vacío {}
+    """
+    if multi_models is None:
+        return {}
+    df_row = prepare_feature_row(user_data)
+    probs = {}
+    for label, mdl in multi_models.items():
+        try:
+            df_al = _align_input_with_pipeline(df_row.copy(), mdl)
+            probs[label.upper()] = float(mdl.predict_proba(df_al)[0][1])
+        except Exception:
+            probs[label.upper()] = None
+    return probs
+
 def calibrated_probability(user_data: dict, model_prob: float, k_neighbors: int = 25, alpha: float = 0.7) -> float:
-    """Mezcla la probabilidad del modelo con la tasa empírica de fallo calculada a partir de casos históricos similares en logs/predicciones.csv.
-    - No hay reentrenamiento; sólo usa feedback etiquetado existente ('Machine failure').
-    - alpha controla la confianza entre modelo y empírico (alpha cercano a 1 confía más en el modelo).
+    """Calibra la probabilidad del modelo combinando predicción con tasa empírica de vecinos similares.
+    
+    Usa un enfoque híbrido: busca los k vecinos más cercanos en el historial de predicciones
+    con feedback etiquetado, calcula su tasa de fallo empírica, y mezcla esa tasa con la
+    probabilidad del modelo usando un parámetro alpha de confianza.
+    
+    Nótese: no hay reentrenamiento. Solo usa feedback válido existente en logs/predicciones.csv.
+    
+    Args:
+        user_data (dict): Parámetros operativos actuales
+        model_prob (float): Probabilidad predicha por el modelo [0, 1]
+        k_neighbors (int): Cantidad de vecinos similares a considerar en historial (default 25)
+        alpha (float): Peso de confianza en el modelo [0, 1] (default 0.7 → 70% modelo, 30% empírico)
+    
+    Returns:
+        float: Probabilidad calibrada en rango [0, 1]
     """
     try:
         if not os.path.exists(PRED_LOG):
             return float(model_prob)
         hist = pd.read_csv(PRED_LOG, engine='python', on_bad_lines='warn')
-        # Require valid feedback to contribute
+        # Filtrar registros con feedback etiquetado (Machine failure y feedback_timestamp válidos)
         valid = hist.copy()
         valid = valid[valid['Machine failure'].isin([0.0, 1.0, 0, 1])]
         valid = valid[pd.to_datetime(valid.get('feedback_timestamp', ''), errors='coerce').notna()]
         if valid.empty:
             return float(model_prob)
-        # Build feature matrix
+        # Construir matriz de características
         feats = ['air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min']
         # Normalizar características numéricas a escalas comparables
         def _norm(col, x):
@@ -245,16 +292,13 @@ def calibrated_probability(user_data: dict, model_prob: float, k_neighbors: int 
                 return 0.5
         q = {f: float(user_data.get(f)) for f in feats}
         qn = {f: _norm(f, q[f]) for f in feats}
-        # Compute distances
         dists = []
         for idx, row in valid.iterrows():
             try:
                 rn = {f: _norm(f, float(row.get(f))) for f in feats}
-                # Distancia euclidiana sobre características normalizadas
                 dist = 0.0
                 for f in feats:
                     dist += (qn[f] - rn[f])**2
-                # Penalización por tipo si es diferente
                 type_pen = 0.0 if str(row.get('type')) == str(user_data.get('type')) else 0.15
                 dists.append((dist + type_pen, float(row.get('Machine failure', 0.0))))
             except Exception:
@@ -265,13 +309,52 @@ def calibrated_probability(user_data: dict, model_prob: float, k_neighbors: int 
         neighbors = dists[:max(1, k_neighbors)]
         empirical = sum([mf for _, mf in neighbors]) / len(neighbors)
         calib = float(alpha) * float(model_prob) + (1.0 - float(alpha)) * float(empirical)
-        # Limitar a [0.0, 1.0]
         calib = max(0.0, min(1.0, calib))
         return calib
     except Exception:
         return float(model_prob)
 
+@st.cache_resource
+def load_models():
+    """Carga los modelos de clasificación binaria y multilabel desde archivos joblib en disco.
+    
+    Intenta cargar dos modelos:
+    1. Modelo binario: Predice presencia/ausencia de fallo (sí/no)
+    2. Modelos multilabel: Clasificadores individuales para cada tipo de fallo (TWF, HDF, PWF, OSF, RNF)
+    
+    Si alguno falla, emite una advertencia pero continua con los que se carguen correctamente.
+    El caching garantiza que los modelos se cargan solo una vez por sesión de Streamlit.
+    
+    Returns:
+        tuple: (modelo_binario, diccionario_modelos_multilabel) donde cada elemento es None si falla su carga
+    """
+    model = None
+    multi = None
+    
+    try:
+        if os.path.exists(MODEL_PATH):
+            model = joblib.load(MODEL_PATH)
+    except Exception:
+        st.warning('No se pudo cargar el modelo binario')
+    
+    try:
+        if os.path.exists(MULTILABEL_MODEL_PATH):
+            multi = joblib.load(MULTILABEL_MODEL_PATH)
+    except Exception:
+        st.warning('No se pudo cargar los modelos multilabel')
+    
+    return model, multi
+
+@st.cache_resource
 def best_model_name():
+    """Extrae el nombre del mejor modelo entrenado a partir del archivo de métricas.
+    
+    Lee el archivo de métricas guardado durante el entrenamiento y busca el modelo
+    con el AUC más alto. Si no hay métricas disponibles, retorna 'GradientBoosting' por defecto.
+    
+    Returns:
+        str: Nombre del mejor modelo o 'GradientBoosting' por defecto
+    """
     try:
         if os.path.exists(METRICS_PATH):
             metrics = joblib.load(METRICS_PATH)
@@ -293,23 +376,6 @@ def load_metrics_status():
     status = {}
     status['best_model'] = 'GradientBoosting'
     
-    # Cargar métricas si existen
-    if os.path.exists(METRICS_PATH):
-        try:
-            metrics = joblib.load(METRICS_PATH)
-            if isinstance(metrics, dict) and 'aucs' in metrics:
-                status['aucs'] = metrics['aucs']
-            elif isinstance(metrics, dict):
-                # Si metrics tiene claves como 'RandomForest', 'GradientBoosting', etc.
-                aucs = {}
-                for model_name, model_metrics in metrics.items():
-                    if isinstance(model_metrics, dict) and 'auc' in model_metrics:
-                        aucs[model_name] = model_metrics['auc']
-                if aucs:
-                    status['aucs'] = aucs
-        except Exception:
-            pass
-    
     if os.path.exists(MODEL_PATH):
         status['model_file'] = MODEL_PATH
         status['last_modified'] = str(pd.to_datetime(os.path.getmtime(MODEL_PATH), unit='s'))
@@ -317,8 +383,49 @@ def load_metrics_status():
         status['message'] = 'Entrene una vez el modelo base con el dataset original.'
     return status
 
+def load_multilabel_status():
+    """Retorna el estado y métricas del modelo multilabel en formato JSON."""
+    status = {}
+    status['model_used'] = 'RandomForest'
+    
+    if os.path.exists(MULTILABEL_MODEL_PATH):
+        status['model_file'] = MULTILABEL_MODEL_PATH
+        status['last_modified'] = str(pd.to_datetime(os.path.getmtime(MULTILABEL_MODEL_PATH), unit='s'))
+    else:
+        status['message'] = 'No hay modelo multilabel entrenado. Entrena failure_multilabel_models.joblib.'
+    
+    if os.path.exists(MULTILABEL_METRICS_PATH):
+        try:
+            metrics = joblib.load(MULTILABEL_METRICS_PATH)
+            status['metrics_available'] = True
+            if isinstance(metrics, dict):
+                status['labels'] = sorted(list(metrics.keys()))
+        except Exception:
+            status['metrics_available'] = False
+    
+    return status
+
 def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = None, feedback_timestamp: pd.Timestamp = None):
-    # Protección: permitir suprimir escrituras durante acciones UI como "Borrar predicción"
+    """Registra una predicción en el archivo CSV de log con manejo de actualizaciones por feedback.
+    
+    Implementa un sistema de dos pasos para registrar predicciones y actualizar con feedback:
+    1. Primer llamado (sin feedback): Crea nueva fila en el CSV con timestamp de predicción
+    2. Segundo llamado (con feedback): Localiza la fila anterior por timestamp exacto y actualiza
+       los campos Machine failure y feedback_timestamp con el feedback del usuario.
+    
+    Manejador especial: Respeta la bandera suppress_logging para evitar registros durante
+    operaciones de limpieza (ej: cuando el usuario borra la última predicción).
+    
+    Args:
+        data (dict): Parámetros operativos. Debe incluir 'prediction_timestamp' para deduplicación
+        prob (float): Probabilidad de fallo predicha [0, 1]
+        pred (int): Predicción binaria (0 = no fallo, 1 = fallo)
+        machine_failure (int, optional): Feedback del usuario (0/1) o None si aún no hay feedback
+        feedback_timestamp (pd.Timestamp, optional): Marca temporal del feedback o None
+    
+    Returns:
+        None
+    """
     try:
         if st.session_state.get('suppress_logging', False):
             return
@@ -335,7 +442,7 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
             existing_cols = [c.strip() for c in first_line.split(',') if c.strip()]
             missing = [c for c in full_header if c not in existing_cols]
             if missing:
-                # Rewrite CSV with new header and append old rows with empty values for missing columns
+                # Reescribir CSV con nuevo encabezado y anexar filas antiguas con valores vacíos para columnas faltantes
                 df_old = pd.read_csv(PRED_LOG, engine='python', on_bad_lines='warn')
                 for c in missing:
                     df_old[c] = ''
@@ -362,15 +469,22 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
                     fb_ts = str(feedback_timestamp)
             except Exception:
                 fb_ts = str(feedback_timestamp)
+        # Asegurar que el archivo termina con newline antes de escribir
+        if os.path.exists(PRED_LOG):
+            with open(PRED_LOG, 'rb') as f:
+                f.seek(-1, 2)  # Ir al último byte
+                if f.read(1) not in (b'\n', b'\r'):
+                    with open(PRED_LOG, 'a') as f_fix:
+                        f_fix.write('\n')
         with open(PRED_LOG, 'a', newline='') as f:
             w = csv.writer(f)
             if write_header:
                 w.writerow(header)
             w.writerow([ts, data['air_temp_k'], data['process_temp_k'], data['rot_speed_rpm'], data['torque_nm'], data['tool_wear_min'], data['type'], pred, f"{prob:.4f}", machine_failure if machine_failure is not None else '', fb_ts])
     # Aceptar timestamp proporcionado si existe
-    # deduplicate/update: si existe una fila con el mismo timestamp de predicción (cadena exacta), actualizarla
+    # Actualizar (deduplicación) SOLO cuando hay feedback: buscar por timestamp exacto y actualizar campos
     try:
-        if os.path.exists(PRED_LOG):
+        if (machine_failure is not None or feedback_timestamp is not None) and os.path.exists(PRED_LOG):
             existing = pd.read_csv(PRED_LOG)
             if 'timestamp' in existing.columns and not existing.empty:
                 try:
@@ -379,25 +493,7 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
                     if pd.isna(provided_dt):
                         raise ValueError('Invalid prediction timestamp')
                     provided_str = provided_dt.strftime('%Y-%m-%dT%H:%M:%S')
-                    # Primer intento: coincidencia exacta de cadena en timestamp
                     mask = (existing['timestamp'].astype(str) == provided_str)
-                    if not mask.any():
-                        # En fallback: buscar filas con 'Machine failure' vacío y valores de características idénticos
-                        feature_cols = ['air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob']
-                        try:
-                            for col in feature_cols:
-                                if col == 'prob':
-                                    # Prob almacenada como cadena con 4 decimales; comparar redondeo
-                                    prob_str = f"{prob:.4f}" if prob is not None else ''
-                                    mask_feat = (existing[col].astype(str) == prob_str)
-                                else:
-                                    mask_feat = (existing[col].astype(str) == str(data.get(col if col!='pred' and col!='prob' else col)))
-                                mask = mask & mask_feat if 'mask' in locals() and len(mask) == len(existing) else mask_feat
-                            # Mantener solo candidatos con 'Machine failure' vacío
-                            if 'Machine failure' in existing.columns:
-                                mask = mask & (existing['Machine failure'].astype(str).isin(['','nan']))
-                        except Exception:
-                            pass
                     if mask.any():
                         idxs = existing[mask].index
                         if machine_failure is not None:
@@ -420,28 +516,44 @@ def log_prediction(data: dict, prob: float, pred: int, machine_failure: int = No
     else:
         _write(pd.Timestamp.utcnow())
     
-
-# Versión simplificada para eliminación: borra la última fila del log de predicciones
  
 
 def remove_last_prediction_row() -> bool:
-    """Eliminar la última fila registrada en predicciones.csv (si existe)."""
+    """Elimina la última fila registrada en el archivo CSV de predicciones.
+    
+    Operación atómica: Lee el CSV, remueve la última fila, y reescribe el archivo.
+    Usada cuando el usuario desea cancelar/deshacer la última predicción registrada.
+    
+    Returns:
+        bool: True si se eliminó exitosamente, False si hubo error o el log está vacío
+    """
     try:
         if not os.path.exists(PRED_LOG):
             return False
-        df = pd.read_csv(PRED_LOG)
-        if df.empty:
+        df = pd.read_csv(PRED_LOG, engine='python', on_bad_lines='warn')
+        if df.empty or len(df) == 0:
             return False
         df = df.iloc[:-1].copy()
         df.to_csv(PRED_LOG, index=False)
         return True
-    except Exception:
+    except Exception as e:
         return False
 
 
 def ensure_pred_log_has_history(model, count: int = 500):
-    """Sembrar predicciones.csv con entradas del dataset base para crear historial inicial.
-    Sólo se semilla si el archivo no existe o tiene pocas filas (< count).
+    """Puebla el archivo de log de predicciones con un historial inicial del dataset base.
+    
+    Util para bootstrapping: Si el archivo de log no existe o tiene pocas filas (< count),
+    carga muestras del dataset base ai4i2020.csv, genera predicciones para ellas, y las
+    agrega al log. De esta manera, el sistema de calibración de probabilidades (que busca
+    vecinos similares en historial) tiene suficientes ejemplos para funcionar bien.
+    
+    Args:
+        model: Modelo entrenado para generar predicciones
+        count (int): Número mínimo de filas esperadas en el log (default 500)
+    
+    Returns:
+        None. Modifica el archivo logs/predicciones.csv como efecto secundario.
     """
     try:
         import numpy as np
@@ -473,6 +585,13 @@ def ensure_pred_log_has_history(model, count: int = 500):
             rows.append([pd.Timestamp.utcnow(), data['air_temp_k'], data['process_temp_k'], data['rot_speed_rpm'], data['torque_nm'], data['tool_wear_min'], data['type'], pred, f"{prob:.4f}"])
         write_header = not os.path.exists(PRED_LOG)
         header = ['timestamp','air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob']
+        # Asegurar que el archivo termina con newline antes de escribir
+        if os.path.exists(PRED_LOG) and not write_header:
+            with open(PRED_LOG, 'rb') as f:
+                f.seek(-1, 2)  # Ir al último byte
+                if f.read(1) not in (b'\n', b'\r'):
+                    with open(PRED_LOG, 'a') as f_fix:
+                        f_fix.write('\n')
         with open(PRED_LOG, 'a', newline='') as f:
             w = csv.writer(f)
             if write_header:
@@ -480,12 +599,25 @@ def ensure_pred_log_has_history(model, count: int = 500):
             for r in rows:
                 w.writerow(r)
     except Exception:
-        # ignore seeding errors
+        # Ignorar errores de siembra; el historial puede estar incompleto
         return
 
 def log_feedback(timestamp: str, actual_failure: int):
-    """Compatibilidad hacia atrás: escribir feedback directamente en predicciones.csv para el timestamp dado.
-    Si no existe una entrada para la predicción, crear una con campos de predicción vacíos.
+    """Registra feedback de un usuario sobre una predicción previa (compatibilidad hacia atrás).
+    
+    Busca una fila existente por timestamp de predicción y actualiza sus campos Machine failure
+    y feedback_timestamp. Si no existe una entrada previa, crea una entrada mínima con los datos
+    de feedback disponibles.
+    
+    Esta función proporciona compatibilidad hacia atrás con código más antiguo que pudía
+    registrar feedback sin tener una predicción previa guardada.
+    
+    Args:
+        timestamp (str): Timestamp de la predicción para la cual se registra feedback
+        actual_failure (int): Feedback del usuario (0 = no fallo, 1 = fallo)
+    
+    Returns:
+        None
     """
     try:
         # Intento de localizar una fila de predicción existente y actualizarla
@@ -504,7 +636,7 @@ def log_feedback(timestamp: str, actual_failure: int):
                 df.loc[df['timestamp'] == ts, 'feedback_timestamp'] = str(pd.Timestamp.utcnow())
                 df.to_csv(PRED_LOG, index=False)
                 return
-        # If not found, create a new prediction entry with minimal fields
+        # Si no se encuentra una predicción previa, crear una entrada mínima
         dummy = {
             'air_temp_k': None, 'process_temp_k': None, 'rot_speed_rpm': None,
             'torque_nm': None, 'tool_wear_min': None, 'type': None,
@@ -516,11 +648,32 @@ def log_feedback(timestamp: str, actual_failure: int):
         pass
 
 def bulk_log(df: pd.DataFrame):
-    # expects failure_prob column
+    """Registra en lote múltiples predicciones al CSV de log sin feedback individual.
+    
+    Función de utilidad para añadir histórico masivamente. Itera sobre el DataFrame y
+    escribe cada fila al log de predicciones. Últil para importar datos históricos o
+    simular multiple predicciones de una sola vez.
+    
+    Requiere: DataFrame debe tener columna 'failure_prob' para las probabilidades.
+    
+    Args:
+        df (pd.DataFrame): DataFrame con columnas: air_temp_k, process_temp_k, rot_speed_rpm,
+                          torque_nm, tool_wear_min, type, failure_prob
+    
+    Returns:
+        None. Modifica logs/predicciones.csv como efecto secundario.
+    """
     if 'failure_prob' not in df.columns:
         return
     write_header = not os.path.exists(PRED_LOG)
     header = ['timestamp','air_temp_k','process_temp_k','rot_speed_rpm','torque_nm','tool_wear_min','type','pred','prob','Machine failure','feedback_timestamp']
+    # Asegurar que el archivo termina con newline antes de escribir
+    if os.path.exists(PRED_LOG) and not write_header:
+        with open(PRED_LOG, 'rb') as f:
+            f.seek(-1, 2)  # Ir al último byte
+            if f.read(1) not in (b'\n', b'\r'):
+                with open(PRED_LOG, 'a') as f_fix:
+                    f_fix.write('\n')
     with open(PRED_LOG, 'a', newline='') as f:
         w = csv.writer(f)
         if write_header:
@@ -528,58 +681,17 @@ def bulk_log(df: pd.DataFrame):
         for _, row in df.iterrows():
             w.writerow([pd.Timestamp.utcnow(), row.get('air_temp_k'), row.get('process_temp_k'), row.get('rot_speed_rpm'), row.get('torque_nm'), row.get('tool_wear_min'), row.get('type'), 'NA', f"{row.get('failure_prob'):.4f}", '', ''])
 
-def run_retrain():
-    # Reentrenamiento deshabilitado por requerimiento del proyecto
-    st.info('El reentrenamiento está deshabilitado. El modelo se entrena una sola vez.')
-
-
-def save_row_to_additional(df_row: pd.DataFrame, prefix: str = 'augmented_manual') -> str:
-    """Guardar una fila en data/additional/<prefix>_<timestamp>.csv y devolver la ruta generada."""
-    try:
-        ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        out_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'additional')
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, f"{prefix}_{ts}.csv")
-        import pandas as pd
-        df_row.to_csv(out_path, index=False)
-        return out_path
-    except Exception as e:
-        return None
-
-
-def append_row_to_base(df_row: pd.DataFrame) -> str:
-    """Añadir fila al ai4i2020.csv base con copia de seguridad con marca de tiempo; devolver la ruta del backup.
-    Devuelve la ruta del backup en caso de éxito, None en caso contrario.
-    """
-    try:
-        base_path = find_dataset()
-        backup_path = f"{base_path}.bak_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-        shutil.copy2(base_path, backup_path)
-        # Convert df_row to original schema
-        rec = _to_original_schema(df_row.iloc[0], base_path)
-        # Añadir como una fila única al CSV (manteniendo el orden original del encabezado)
-        import pandas as pd
-        base_df = pd.read_csv(base_path, dtype=str)
-        new_row = {c: rec.get(c, '') for c in base_df.columns}
-        new_row_df = pd.DataFrame([new_row], columns=base_df.columns)
-        base_df = pd.concat([base_df, new_row_df], ignore_index=True)
-        # Write back (preserve original CSV formatting)
-        base_df.to_csv(base_path, index=False)
-        return backup_path
-    except Exception as e:
-        return None
-
 
 def main():
-    st.title('Sistema Inteligente de Mantenimiento Predictivo para maquinaria industrial')
-    st.caption('Monitoreo avanzado de parámetros operativos, predicción de fallos y recomendaciones accionables.')
+    st.title('Automatas - Mantenimiento Predictivo para Centros de Mecanizado')
+    st.caption('Plataforma de inteligencia predictiva para CNC. Diagnóstico multimodal de fallos, simulación de escenarios y feedback inteligente para optimizar mantenimiento preventivo en planta.')
     model, multi = load_models()
     # Inicializar estado de sesión para almacenar última predicción
     try:
         if 'last_prediction_data' not in st.session_state:
             st.session_state.last_prediction_data = None
     except Exception:
-        # st.session_state may not be available outside of Streamlit runtime
+        # st.session_state puede no estar disponible fuera del runtime de Streamlit
         pass
     # Reentrenamiento deshabilitado: no hay bandera ni umbral
 
@@ -599,7 +711,7 @@ def main():
     w_min, w_max = dyn_range('tool_wear_min')
 
     st.sidebar.header('Entrada de Parámetros Operativos')
-    # Check if there's a pending prediction to disable inputs
+    # Verificar si hay una predicción pendiente para desactivar los inputs
     has_pending_prediction = st.session_state.get('last_prediction_data') is not None
     if has_pending_prediction:
         st.sidebar.warning('⚠️ Confirma el feedback de la predicción actual para modificar parámetros.')
@@ -615,14 +727,11 @@ def main():
 - **L (Low)**: Calidad baja, mayor tolerancia a strain (≤11,000)
 - **M (Medium)**: Calidad media, tolerancia moderada (≤12,000)
 - **H (High)**: Calidad alta, menor tolerancia strain (≤13,000)
-
-**Leyenda de umbrales críticos:**
-- Delta térmico crítico < 9 K con baja rotación (<1400 rpm)
-- Potencia segura 3500–9000 W
-- Reemplazo herramienta ≥ 200 min
 """)
 
-    tab_pred, tab_info, tab_explain, tab_hist = st.tabs(["Predicción", "Info / Ayuda", "Explicabilidad", "Histórico"])
+    tab_pred, tab_modes, tab_sim, tab_analysis, tab_info, tab_hist = st.tabs([
+        "Predicción", "Tipo de fallo", "Simulador", "Análisis Comparativo y Causal", "Info / Ayuda", "Histórico"
+    ])
 
     with tab_pred:
         st.subheader('Escenario Actual de Operación')
@@ -634,10 +743,9 @@ def main():
         col4.metric('Torque (Nm)', f"{torque:.1f}")
         col5.metric('Desgaste (min)', f"{wear:.0f}", f"{wear/240*100:.1f}%")
         col6.metric('Tipo', prod_type)
-        st.caption('Indicadores clave del instante operativo. El desgaste (%) se calcula sobre 240 min como límite superior.')
         st.markdown('<hr/>', unsafe_allow_html=True)
         
-        # Disable prediction button if there's a pending prediction without feedback
+        # Desactivar botón de predicción si hay una predicción pendiente sin feedback
         has_pending_prediction = st.session_state.get('last_prediction_data') is not None
         if has_pending_prediction:
             st.info('⚠️ Debes confirmar el feedback de la predicción actual antes de calcular una nueva o modificar parámetros.')
@@ -666,7 +774,7 @@ def main():
             )
             st.rerun()
 
-        # Render resultado + acciones si hay predicción activa en sesión
+        # Mostrar resultado y acciones de feedback si hay predicción activa en la sesión
         if st.session_state.get('last_prediction_data') is not None:
             data_view = st.session_state.get('last_prediction_data')
             prob_v = float(data_view.get('prob', 0.0))
@@ -676,6 +784,19 @@ def main():
             risk_label = 'ALTO' if prob_cal_v>=0.6 else ('MODERADO' if prob_cal_v>=0.3 else 'BAJO')
             st.markdown(f"### Riesgo de fallo: **{risk_label}** - **{prob_cal_v:.2f}**")
             st.markdown(f"Modelo seleccionado: **{best_model_name()}**")
+
+            # Alertas visuales rápidas
+            alert_badges = []
+            if prob_cal_v >= 0.6:
+                alert_badges.append(('ALTO RIESGO', '#c62828'))
+            elif prob_cal_v >= 0.3:
+                alert_badges.append(('RIESGO MODERADO', '#ff8f00'))
+            if alert_badges:
+                chips = " ".join([f"<span style='padding:6px 10px;border-radius:12px;background:{c};color:white;font-weight:700;margin-right:6px;'>" \
+                                   f"{txt}</span>" for txt, c in alert_badges])
+                st.markdown(chips, unsafe_allow_html=True)
+            else:
+                st.success('Condiciones dentro de rango seguro.')
 
             gauge = go.Figure(go.Indicator(
                 mode="gauge+number",
@@ -739,20 +860,6 @@ def main():
             - **Azul/Morado**: Parámetro en rango operativo normal
             """)
 
-            st.subheader('Recomendaciones Acción Inmediata')
-            recs = generate_recommendations(data_view, prob_v, shap_contrib=None)
-            for r in recs:
-                sev_class = 'reco-high' if 'reemplazo' in r['accion'].lower() or 'inspección' in r['accion'].lower() else ('reco-medium' if 'ajustar' in r['accion'].lower() or 'reducir' in r['accion'].lower() else 'reco-low')
-                st.markdown(
-                    f"<div class='reco-card {sev_class}'><strong>{r['accion']}</strong><br><span style='font-size:13px;'>{r['justificacion']}</span></div>",
-                    unsafe_allow_html=True)
-            st.markdown("""
-                        **Clasificación de severidad:**
-                        - Alto (rojo): Acción inmediata / reemplazo / inspección.
-                        - Medio (naranja): Ajuste operativo recomendado pronto.
-                        - Bajo (verde): Condición estable, monitoreo continuo.
-                        """)
-
             st.markdown('<hr/>', unsafe_allow_html=True)
             st.subheader('Feedback Post-Operación')
             feedback_given = st.session_state.get('feedback_given', False)
@@ -774,7 +881,7 @@ def main():
                             feedback_timestamp=pd.Timestamp.utcnow()
                         )
                         st.session_state.feedback_given = True
-                        # Clear active prediction UI and avoid re-logging the same prediction
+                        # Limpiar la UI de predicción activa y evitar registrar nuevamente la misma predicción
                         st.session_state.last_prediction_data = None
                         st.session_state.suppress_logging = True
                         # No combinar feedback ni reentrenar; solo registrar y continuar
@@ -793,7 +900,7 @@ def main():
                             feedback_timestamp=pd.Timestamp.utcnow()
                         )
                         st.session_state.feedback_given = True
-                        # Clear active prediction UI and avoid re-logging the same prediction
+                        # Limpiar la UI de predicción activa y evitar registrar nuevamente la misma predicción
                         st.session_state.last_prediction_data = None
                         st.session_state.suppress_logging = True
                         # No combinar feedback ni reentrenar; solo registrar y continuar
@@ -802,48 +909,422 @@ def main():
                         st.error('⚠️ No hay predicción activa. Primero realiza una predicción.')
 
             if st.button('Borrar predicción actual', key='clear_pred'):
-                try:
-                    if not os.path.exists(PRED_LOG):
-                        st.session_state.last_prediction_data = None
-                        st.session_state.suppress_logging = True
-                        st.warning('No hay predicciones registradas. Genera una predicción antes de borrar.')
-                    else:
-                        try:
-                            _df_chk = pd.read_csv(PRED_LOG)
-                            is_empty = _df_chk.empty
-                        except Exception:
-                            is_empty = True
-                        if is_empty:
-                            st.session_state.last_prediction_data = None
-                            st.session_state.suppress_logging = True
-                            st.warning('No hay predicciones registradas. Genera una predicción antes de borrar.')
-                        else:
-                            removed = remove_last_prediction_row()
-                            st.session_state.last_prediction_data = None
-                            st.session_state.suppress_logging = True
-                            if removed:
-                                st.success('🗑️ Última fila eliminada de predicciones. No se registrará feedback para esta instancia.')
-                            else:
-                                st.info('No se pudo eliminar. Sesión limpiada y sin registro adicional.')
-                            st.rerun()
-                except Exception:
-                    st.info('No se pudo eliminar. Sesión limpiada y sin registro adicional.')
+                # Limpiar sesión primero
+                st.session_state.last_prediction_data = None
+                st.session_state.suppress_logging = True
+                
+                # Intentar borrar la última fila
+                removed = remove_last_prediction_row()
+                
+                if removed:
+                    st.success('🗑️ Última fila eliminada de predicciones correctamente.')
                     st.rerun()
+                else:
+                    st.warning('No hay predicciones registradas a borrar.')
 
+
+
+    with tab_modes:
+        st.subheader('Análisis de Tipos de Fallo Detectados')
+        st.caption('Identifica cuáles tipos de fallo tienen mayor probabilidad en las condiciones actuales y muestra acciones prioritarias para reducirlos.')
+
+        if multi is None:
+            st.warning('Los modelos multilabel no están cargados. Entrena o agrega failure_multilabel_models.joblib para habilitar este panel.')
+        else:
+            base_data = st.session_state.get('last_prediction_data') or {
+                'air_temp_k': air_temp,
+                'process_temp_k': process_temp,
+                'rot_speed_rpm': rot_speed,
+                'torque_nm': torque,
+                'tool_wear_min': wear,
+                'type': prod_type
+            }
+            mode_probs = predict_modes_multilabel(multi, base_data)
+            # Filtrar valores None y verificar si hay valores válidos
+            valid_mode_probs = {k: v for k, v in mode_probs.items() if v is not None}
+            
+            if not valid_mode_probs:
+                st.info('No se pudieron calcular probabilidades por modo.')
+            else:
+                labels = list(valid_mode_probs.keys())
+                values = [valid_mode_probs[lbl] for lbl in labels]
+                colors = ['#c62828' if v >= 0.6 else ('#ff8f00' if v >= 0.3 else '#2e7d32') for v in values]
+                fig_modes = go.Figure(go.Bar(x=labels, y=values, marker_color=colors, text=[f"{v:.2f}" for v in values], textposition='auto'))
+                fig_modes.update_yaxes(range=[0, 1], tickformat='.0%')
+                fig_modes.update_layout(title='Probabilidad por tipo de fallo', height=420)
+                st.plotly_chart(fig_modes, use_container_width=True)
+
+                # Mostrar recomendaciones para TODOS los fallos con probabilidad >= 0.3
+                max_prob = max(valid_mode_probs.values()) if valid_mode_probs else 0
+                
+                if max_prob >= 0.3:
+                    st.markdown('#### Acciones específicas según tus parámetros')
+                    
+                    # Calcular parámetros para análisis
+                    delta_temp = base_data['process_temp_k'] - base_data['air_temp_k']
+                    omega_rad_s = base_data['rot_speed_rpm'] * 2 * 3.141592653589793 / 60
+                    power_w = base_data['torque_nm'] * omega_rad_s
+                    wear_pct = base_data['tool_wear_min'] / 240.0
+                    
+                    # Filtrar y ordenar fallos con probabilidad >= 0.3
+                    significant_failures = [(lbl, prob) for lbl, prob in valid_mode_probs.items() if prob >= 0.3]
+                    significant_failures.sort(key=lambda x: x[1], reverse=True)  # Ordenar por probabilidad descendente
+                    
+                    # Mostrar recomendaciones para TODOS los fallos significativos
+                    for lbl, prob_val in significant_failures:
+                        risk_level = '🔴 ALTO RIESGO' if prob_val >= 0.6 else '🟠 RIESGO MODERADO'
+                        
+                        if lbl == 'TWF':
+                            st.warning(f"**{lbl} - {prob_val:.1%} {risk_level}**")
+                            st.markdown(f"Tu desgaste es **{base_data['tool_wear_min']:.0f} min** (límite crítico: 200 min)")
+                            st.markdown(f"**ACCIÓN:** Reemplaza la herramienta")
+                            
+                        elif lbl == 'HDF':
+                            st.warning(f"**{lbl} - {prob_val:.1%} {risk_level}**")
+                            st.markdown(f"Tu delta térmico es **{delta_temp:.1f} K** (mínimo recomendado: 9 K)")
+                            if delta_temp < 9:
+                                st.markdown(f"**ACCIÓN:** Reduce torque o aumenta RPM para mejorar disipación térmica")
+                                
+                        elif lbl == 'PWF':
+                            st.warning(f"**{lbl} - {prob_val:.1%} {risk_level}**")
+                            st.markdown(f"Tu potencia es **{power_w:.0f} W** (rango seguro: 3,500-9,000 W)")
+                            if power_w < 3500:
+                                st.markdown(f"**ACCIÓN:** Aumenta torque o mantén RPM constante")
+                            elif power_w > 9000:
+                                st.markdown(f"**ACCIÓN:** Reduce torque o aumenta RPM")
+                                
+                        elif lbl == 'OSF':
+                            st.warning(f"**{lbl} - {prob_val:.1%} {risk_level}**")
+                            st.markdown(f"Desgaste: **{base_data['tool_wear_min']:.0f} min** ({wear_pct*100:.0f}%) | Torque: **{base_data['torque_nm']:.1f} Nm**")
+                            st.markdown(f"**ACCIÓN:** Reduce carga de trabajo - disminuye torque")
+                            
+                        elif lbl == 'RNF':
+                            st.warning(f"**{lbl} - {prob_val:.1%} {risk_level}**")
+                            st.markdown("**ACCIÓN:** Ejecuta diagnóstico/reset de la máquina CNC. Verifica conexiones de sensores.")
+                        
+                        st.divider()  # Separador visual entre fallos
+
+
+    with tab_sim:
+        st.subheader('Simulador de escenarios')
+        st.caption('Compara escenarios para decidir ajustes operativos.')
+        
+        colA, colB = st.columns(2)
+        
+        with colA:
+            st.markdown('### Escenario A')
+            st.info('Condiciones actuales de operación')
+            air_temp_a = st.number_input('Temp. Ambiente [K] - A', value=air_temp, step=0.1, format="%.1f", disabled=True)
+            process_temp_a = st.number_input('Temp. Proceso [K] - A', value=process_temp, step=0.1, format="%.1f", disabled=True)
+            rot_speed_a = st.number_input('Velocidad [rpm] - A', value=rot_speed, step=1.0, format="%.0f", disabled=True)
+            torque_a = st.number_input('Torque [Nm] - A', value=torque, step=0.1, format="%.1f", disabled=True)
+            wear_a = st.number_input('Desgaste [min] - A', value=wear, step=1.0, format="%.0f", disabled=True)
+            type_a = st.selectbox('Tipo de producto - A', ['L','M','H'], index=['L','M','H'].index(prod_type), disabled=True)
+            
+        with colB:
+            st.markdown('### Escenario B')
+            st.info('Ingresa los parámetros operativos para el escenario B')
+            air_temp_b = st.number_input('Temp. Ambiente [K] - B', value=298.0, step=0.1, format="%.1f", key='air_b')
+            process_temp_b = st.number_input('Temp. Proceso [K] - B', value=308.0, step=0.1, format="%.1f", key='proc_b')
+            rot_speed_b = st.number_input('Velocidad [rpm] - B', value=1200.0, step=1.0, format="%.0f", key='rpm_b')
+            torque_b = st.number_input('Torque [Nm] - B', value=35.0, step=0.1, format="%.1f", key='tq_b')
+            wear_b = st.number_input('Desgaste [min] - B', value=75.0, step=1.0, format="%.0f", key='wear_b')
+            type_b = st.selectbox('Tipo de producto - B', ['L','M','H'], index=0, key='type_b')
+
+        scen_a = {
+            'air_temp_k': air_temp_a,
+            'process_temp_k': process_temp_a,
+            'rot_speed_rpm': rot_speed_a,
+            'torque_nm': torque_a,
+            'tool_wear_min': wear_a,
+            'type': type_a
+        }
+        
+        scen_b = {
+            'air_temp_k': air_temp_b,
+            'process_temp_k': process_temp_b,
+            'rot_speed_rpm': rot_speed_b,
+            'torque_nm': torque_b,
+            'tool_wear_min': wear_b,
+            'type': type_b
+        }
+
+        def _score_scenario(name, data_row):
+            """Calcula probabilidad y riesgo similar a la pestaña Predicción"""
+            pred_s, prob_s = predict_instance(model, data_row)
+            prob_cal_s = calibrated_probability(data_row, prob_s, k_neighbors=15, alpha=0.7)
+            modes_s = predict_modes_multilabel(multi, data_row) if multi is not None else {}
+            valid_modes = {k: v for k, v in modes_s.items() if v is not None}
+            top_mode = max(valid_modes.items(), key=lambda x: x[1])[0] if valid_modes else 'N/A'
+            
+            return {
+                'Escenario': name,
+                'Prob_fallo': prob_cal_s,
+                'Modo_top': top_mode,
+                'temp_amb': data_row['air_temp_k'],
+                'temp_proc': data_row['process_temp_k'],
+                'rpm': data_row['rot_speed_rpm'],
+                'torque': data_row['torque_nm'],
+                'desgaste': data_row['tool_wear_min'],
+                'tipo': data_row['type']
+            }
+
+        results = [
+            _score_scenario('Escenario A', scen_a),
+            _score_scenario('Escenario B', scen_b)
+        ]
+        
+        # Función auxiliar para mostrar modos de fallo de un escenario
+        def _show_scenario_failure_modes(scenario_name, scenario_data):
+            mode_probs = predict_modes_multilabel(multi, scenario_data)
+            valid_mode_probs = {k: v for k, v in mode_probs.items() if v is not None}
+            
+            if valid_mode_probs:
+                labels = list(valid_mode_probs.keys())
+                values = [valid_mode_probs[lbl] for lbl in labels]
+                colors = ['#c62828' if v >= 0.6 else ('#ff8f00' if v >= 0.3 else '#2e7d32') for v in values]
+                
+                fig_modes = go.Figure(go.Bar(
+                    x=labels, y=values, marker_color=colors, 
+                    text=[f"{v:.1%}" for v in values], 
+                    textposition='auto'
+                ))
+                fig_modes.update_yaxes(range=[0, 1], tickformat='.0%')
+                fig_modes.update_layout(title=f'Tipo de fallo más probable - {scenario_name}', height=350, showlegend=False)
+                
+                return fig_modes, valid_mode_probs
+            return None, {}
+        
+        # Mostrar modos de fallo para ambos escenarios
+        st.markdown('---')
+        st.subheader('Análisis de Tipo de fallo más Probable por Escenario')
+        st.caption('Probabilidad de cada tipo de fallo en cada escenario')
+        
+        col_modes1, col_modes2 = st.columns(2)
+        
+        with col_modes1:
+            fig_a, modes_a = _show_scenario_failure_modes('Escenario A', scen_a)
+            if fig_a:
+                st.plotly_chart(fig_a, use_container_width=True)
+        
+        with col_modes2:
+            fig_b, modes_b = _show_scenario_failure_modes('Escenario B', scen_b)
+            if fig_b:
+                st.plotly_chart(fig_b, use_container_width=True)
+        
+        # Gráfico de riesgo por escenario
+        fig_sim = go.Figure()
+        for r in results:
+            risk_label = 'ALTO' if r['Prob_fallo']>=0.6 else ('MODERADO' if r['Prob_fallo']>=0.3 else 'BAJO')
+            color = '#c62828' if r['Prob_fallo']>=0.6 else ('#ff8f00' if r['Prob_fallo']>=0.3 else '#2e7d32')
+            fig_sim.add_trace(go.Bar(
+                name=r['Escenario'], 
+                x=['Riesgo'], 
+                y=[r['Prob_fallo']], 
+                text=[f"{r['Prob_fallo']:.2%}<br>{risk_label}"], 
+                textposition='auto',
+                marker_color=color
+            ))
+        fig_sim.update_yaxes(range=[0,1], tickformat='.0%')
+        fig_sim.update_layout(barmode='group', title='Comparativa de riesgo por escenario', height=420)
+        st.plotly_chart(fig_sim, use_container_width=True)
+        
+        # Mostrar detalles de riesgo por escenario (igual que en Predicción)
+        st.markdown('---')
+        st.subheader('Análisis Detallado por Escenario')
+        
+        cols_detail = st.columns(2)
+        for col, result in zip(cols_detail, results):
+            with col:
+                st.markdown(f"### {result['Escenario']}")
+                risk_label = 'ALTO' if result['Prob_fallo']>=0.6 else ('MODERADO' if result['Prob_fallo']>=0.3 else 'BAJO')
+                color = '#c62828' if result['Prob_fallo']>=0.6 else ('#ff8f00' if result['Prob_fallo']>=0.3 else '#2e7d32')
+                
+                st.metric('Riesgo', f"{result['Prob_fallo']:.1%}", f"{risk_label}")
+                st.markdown(f"**Tipo de fallo más probable:** {result['Modo_top']}")
+                st.markdown(f"**Tipo:** {result['tipo']}")
+                st.markdown(f"- RPM: {result['rpm']:.0f}")
+                st.markdown(f"- Torque: {result['torque']:.2f} Nm")
+                st.markdown(f"- Temp. proceso: {result['temp_proc']:.1f} K")
+                st.markdown(f"- Desgaste: {result['desgaste']:.0f} min")
+
+
+    with tab_analysis:
+        st.subheader('Análisis Comparativo y Causal de Fallos')
+        st.caption('Benchmarking entre tipos de producto, correlaciones, heatmaps y reglas de decisión interpretables.')
+        
+        # Cargar datos históricos
+        log_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'predicciones.csv')
+        
+        if not os.path.exists(log_path):
+            st.warning('⚠️ No hay datos históricos. Primero genera predicciones para análisis.')
+        else:
+            try:
+                hist = pd.read_csv(log_path, engine='python', on_bad_lines='warn')
+                
+                if hist.empty or len(hist) < 10:
+                    st.info('Se necesitan al menos 10 predicciones registradas para análisis significativo.')
+                else:
+                    st.markdown('---')
+                    st.markdown('### Benchmarking: Desempeño por Tipo de Producto')
+                    
+                    stats_by_type = analyze_by_product_type(hist)
+                    
+                    if stats_by_type:
+                        # Tabla de estadísticas
+                        col1, col2, col3 = st.columns(3)
+                        
+                        for i, (prod_type, stats) in enumerate(sorted(stats_by_type.items())):
+                            col = [col1, col2, col3][i % 3]
+                            with col:
+                                st.markdown(f"#### Tipo **{prod_type}**")
+                                st.metric('Predicciones', stats['total_predictions'])
+                                st.metric('Fallos Registrados', stats['actual_failures'])
+                                st.metric('Tasa de Fallos', f"{stats['failure_rate']:.1f}%")
+                                st.metric('Riesgo Promedio', f"{stats['avg_prob_risk']:.1%}")
+                                st.metric('Desgaste Prom.', f"{stats['avg_wear']:.0f} min")
+                                st.metric('RPM Promedio', f"{stats['avg_rpm']:.0f}")
+                        
+                        # Gráfico comparativo
+                        st.markdown('')
+                        fig_bench = create_benchmark_comparison(stats_by_type)
+                        if fig_bench:
+                            st.plotly_chart(fig_bench, use_container_width=True)
+                            st.caption('**Interpretación:** Compara tasas de fallos, riesgo promedio y desgaste entre tipos de producto.')
+                    
+                    st.markdown('---')
+                    st.markdown('### Matriz de Correlación: Parámetros vs Fallos')
+                    st.caption('Identifica qué variables operativas tienen mayor impacto en los fallos.')
+                    
+                    corr_df = calculate_correlation_matrix(hist)
+                    
+                    if not corr_df.empty:
+                        # Mostrar solo las correlaciones con Machine failure
+                        if 'Machine failure' in corr_df.columns:
+                            failure_corr = corr_df[['Machine failure']].sort_values('Machine failure', ascending=False)
+                            
+                            st.markdown('#### Correlación con Fallos de Máquina')
+                            col_table, col_desc = st.columns([1.5, 1])
+                            
+                            with col_table:
+                                st.dataframe(
+                                    failure_corr.style.format('{:.3f}').background_gradient(
+                                        cmap='RdYlGn', subset=['Machine failure']
+                                    ),
+                                    use_container_width=True
+                                )
+                            
+                            with col_desc:
+                                st.markdown("""
+                                **Interpretación:**
+                                - **Valores cercanos a +1**: Variable aumenta cuando hay fallo
+                                - **Valores cercanos a -1**: Variable disminuye cuando hay fallo
+                                - **Valores cercanos a 0**: Poca o nula relación con fallos
+                                """)
+                        
+                        # Heatmap completo
+                        st.markdown('')
+                        fig_corr = create_correlation_heatmap(corr_df)
+                        if fig_corr:
+                            st.plotly_chart(fig_corr, use_container_width=True)
+                    else:
+                        st.info('No hay datos suficientes para calcular correlación.')
+                    
+                    st.markdown('---')
+                    st.markdown('### Heatmaps Causales: Fallos por Parámetros')
+                    st.caption('Visualiza la tasa de fallos según combinación de dos parámetros.')
+                    
+                    col_heat1, col_heat2 = st.columns(2)
+                    
+                    with col_heat1:
+                        param1_heat = st.selectbox(
+                            'Parámetro 1 (Eje Y):',
+                            ['tool_wear_min', 'air_temp_k', 'rot_speed_rpm', 'torque_nm'],
+                            key='param1_heat'
+                        )
+                    
+                    with col_heat2:
+                        param2_heat = st.selectbox(
+                            'Parámetro 2 (Eje X):',
+                            ['rot_speed_rpm', 'tool_wear_min', 'torque_nm', 'air_temp_k'],
+                            key='param2_heat'
+                        )
+                    
+                    if param1_heat != param2_heat:
+                        pivot_heat = calculate_failure_rates_by_bins(hist, param1_heat, param2_heat, bins1=4, bins2=4)
+                        
+                        if not pivot_heat.empty:
+                            fig_heat = create_failure_heatmap(pivot_heat, param1_heat, param2_heat)
+                            if fig_heat:
+                                st.plotly_chart(fig_heat, use_container_width=True)
+                                st.caption('**Interpretación:** Las zonas rojas (más claras) indican mayor tasa de fallos en esa combinación de parámetros.')
+                        else:
+                            st.warning('No hay datos suficientes para este par de parámetros.')
+                    else:
+                        st.warning('Selecciona dos parámetros diferentes.')
+                    
+                    st.markdown('---')
+                    st.markdown('### Análisis 3D Interactivo')
+                    st.caption('Explora tres dimensiones simultáneamente. Los colores indican presencia de fallo.')
+                    
+                    col_3d1, col_3d2, col_3d3 = st.columns(3)
+                    
+                    with col_3d1:
+                        x_3d = st.selectbox('Eje X:', ['air_temp_k', 'rot_speed_rpm', 'torque_nm', 'tool_wear_min'], 
+                                           key='x_3d', index=0)
+                    
+                    with col_3d2:
+                        y_3d = st.selectbox('Eje Y:', ['rot_speed_rpm', 'torque_nm', 'air_temp_k', 'tool_wear_min'],
+                                           key='y_3d', index=1)
+                    
+                    with col_3d3:
+                        z_3d = st.selectbox('Eje Z:', ['tool_wear_min', 'torque_nm', 'air_temp_k', 'rot_speed_rpm'],
+                                           key='z_3d', index=2)
+                    
+                    if len({x_3d, y_3d, z_3d}) == 3:  # Verificar que sean diferentes
+                        fig_3d = create_3d_scatter(hist, x_3d, y_3d, z_3d, 'Machine failure')
+                        if fig_3d:
+                            st.plotly_chart(fig_3d, use_container_width=True)
+                            st.caption('**Interactivo:** Puedes rotar, hacer zoom y pasar el mouse para ver detalles. Los puntos rojos indican fallos.')
+                    else:
+                        st.warning('Selecciona tres ejes diferentes.')
+                    
+            except Exception as e:
+                st.error(f'Error procesando análisis: {e}')
+                import traceback
+                st.code(traceback.format_exc())
 
 
     with tab_info:
-        st.markdown('## Concepto del Sistema')
-        st.markdown('''**Sistema Inteligente de Mantenimiento Predictivo** que integra datos históricos y en línea para anticipar modos de fallo y guiar intervenciones proactivas, reduciendo paros no planificados y costos de operación.''')
-        st.markdown('### Leyenda y Umbrales Clave')
+        st.markdown('## Concepto de Automatas')
+        st.markdown('''**Automatas** es un sistema inteligente de mantenimiento predictivo para centros CNC con diagnóstico multimodal, simulación de escenarios operativos y calibración de riesgos mediante historial inteligente. Anticipa fallos en herramientas y máquinas para permitir intervenciones proactivas que reducen paros no planificados y optimizan costos de operación.''')
+        st.markdown('### Leyenda de Variables de Entrada')
+        st.markdown('''<ul>
+        <li><strong>Temperatura ambiente [K]</strong>: Temperatura del entorno donde opera la máquina.</li>
+        <li><strong>Temperatura de proceso [K]</strong>: Temperatura alcanzada durante el mecanizado (mayor que ambiente).</li>
+        <li><strong>Velocidad de rotación [rpm]</strong>: Revoluciones por minuto del husillo/herramienta.</li>
+        <li><strong>Torque [Nm]</strong>: Fuerza de torsión aplicada durante el corte.</li>
+        <li><strong>Desgaste herramienta [min]</strong>: Tiempo acumulado de uso de la herramienta (límite: 240 min).</li>
+        </ul>''', unsafe_allow_html=True)
+        st.markdown('### Indicadores de Riesgo y Umbrales Clave')
         st.markdown('''<ul>
         <li><strong>Delta térmico</strong>: Diferencia proceso - ambiente. &lt; 9 K + rotación baja (&lt;1400 rpm) implica riesgo de disipación (HDF).</li>
         <li><strong>Potencia</strong>: Producto torque * velocidad angular (W). Fuera de 3500–9000 W sugiere ineficiencia o riesgo PWF.</li>
         <li><strong>Desgaste herramienta</strong>: ≥ 200 min alcanza umbral crítico (TWF).</li>
-        <li><strong>Sobrestrain</strong>: wear * torque supera límite según tipo L/M/H.</li>
+        <li><strong>Sobrestrain (desgaste × torque)</strong>: Producto de desgaste de herramienta y torque aplicado. Superar el límite según tipo de pieza indica esfuerzo excesivo y riesgo de fallo.</li>
+        </ul>''', unsafe_allow_html=True)
+        st.markdown('### Leyenda de Tipos de Fallo')
+        st.markdown('''<ul>
+        <li><strong>TWF (Tool Wear Failure)</strong>: Fallo por Desgaste de Herramienta - La herramienta se ha desgastado demasiado y requiere cambio.</li>
+        <li><strong>HDF (Heat Dissipation Failure)</strong>: Fallo por Disipación de Calor - Problemas con la refrigeración o disipación térmica insuficiente.</li>
+        <li><strong>PWF (Power Failure)</strong>: Fallo por Potencia - La máquina opera fuera del rango de potencia óptimo (3.5–9 kW).</li>
+        <li><strong>OSF (Overstrain Failure)</strong>: Fallo por Sobrestrain - Esfuerzo excesivo en la herramienta por combinación de desgaste y torque.</li>
+        <li><strong>RNF (Random Network Failure)</strong>: Fallo Aleatorio - Fallos impredecibles causados por factores externos o errores aleatorios.</li>
         </ul>''', unsafe_allow_html=True)
         st.markdown('### Estado del Modelo')
         st.json(load_metrics_status())
+        st.markdown('### Estado de modelo Multilabel')
+        st.json(load_multilabel_status())
         st.markdown('### Buenas Prácticas Industriales')
         st.markdown('''<ol>
         <li>Registrar cada intervención y comparar predicción vs resultado real.</li>
@@ -855,135 +1336,6 @@ def main():
         # Botón reentrenar
         
 
-    with tab_explain:
-        st.subheader('Explicabilidad de la Predicción con SHAP')
-        
-        # Información sobre SHAP
-        with st.expander('¿Qué es SHAP y cómo interpretarlo?', expanded=False):
-            st.markdown("""
-            ### SHAP (SHapley Additive exPlanations)
-            
-            **SHAP** es una técnica avanzada de **interpretabilidad de modelos de IA** que explica cómo cada parámetro 
-            operativo contribuye a la predicción de riesgo de fallo.
-            
-            #### ¿Cómo funciona?
-            - Basado en **teoría de juegos** (valores de Shapley)
-            - Calcula la **contribución marginal** de cada característica
-            - Proporciona explicaciones **locales** (para cada predicción individual)
-            
-            #### ¿Cómo interpretar los valores?
-            
-            | Color | Significado | Interpretación |
-            |-------|-------------|----------------|
-            | **Rojo** | Valor positivo | Este parámetro **aumenta** el riesgo de fallo |
-            | **Verde** | Valor negativo | Este parámetro **reduce** el riesgo de fallo |
-            | **Magnitud** | Tamaño del número | Mayor valor = Mayor impacto en la predicción |
-            
-            #### Ejemplo práctico:
-            - `torque_nm: +0.2150` (Rojo) → El torque actual está aumentando significativamente el riesgo
-            - `delta_temp: -0.0450` (Verde) → El delta térmico está ayudando a reducir el riesgo
-            - `tool_wear_min: +0.1820` (Rojo) → El desgaste contribuye al riesgo moderadamente
-            
-            #### ¿Por qué es importante?
-            - **Transparencia**: Entender qué factores influyen en cada decisión
-            - **Confianza**: Validar que el modelo considera factores correctos
-            - **Acción**: Identificar qué parámetros ajustar para reducir riesgo
-            """)
-        
-        if st.session_state.get('last_prediction_data', None) is None:
-            st.warning('⚠️ Primero realiza una predicción en la pestaña "Predicción" para generar explicaciones SHAP.')
-        else:
-            # Mostrar parámetros de la última predicción
-            st.markdown('#### Parámetros de la Predicción Actual')
-            data = st.session_state.get('last_prediction_data')
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric('Temp. Ambiente', f"{data['air_temp_k']:.1f} K")
-                st.metric('Temp. Proceso', f"{data['process_temp_k']:.1f} K")
-            with col2:
-                st.metric('Velocidad', f"{data['rot_speed_rpm']:.0f} rpm")
-                st.metric('Torque', f"{data['torque_nm']:.1f} Nm")
-            with col3:
-                st.metric('Desgaste', f"{data['tool_wear_min']:.0f} min")
-                st.metric('Tipo Producto', data['type'])
-            
-            st.markdown('---')
-            
-            if st.button('Generar Explicabilidad SHAP', type='primary'):
-                with st.spinner('Calculando explicaciones SHAP... (esto puede tomar unos segundos)'):
-                    try:
-                        contrib = shap_for_instance(data)
-                    except Exception as e:
-                        import traceback
-                        st.error(f"Error generando SHAP: {e}")
-                        st.code(traceback.format_exc())
-                        contrib = None
-                    
-                    if contrib is None:
-                        st.warning('No fue posible generar explicaciones SHAP para la instancia solicitada.')
-                    else:
-                        st.markdown('### Análisis de Contribución de Factores')
-                        st.caption('Los siguientes factores explican cómo cada parámetro influye en la predicción de riesgo:')
-                        
-                        # Crear visualización mejorada
-                        import plotly.express as px
-                        
-                        # Preparar datos para gráfica
-                        features = [feat for feat, _ in contrib]
-                        values = [val for _, val in contrib]
-                        colors = ['#d32f2f' if v > 0 else '#2e7d32' for v in values]
-                    
-                        # Gráfica de barras horizontal
-                        fig_shap = go.Figure()
-                        fig_shap.add_trace(go.Bar(
-                            y=features[::-1],  # Invertir para mostrar el más importante arriba
-                            x=values[::-1],
-                            orientation='h',
-                            marker_color=colors[::-1],
-                            text=[f"{v:+.4f}" for v in values[::-1]],
-                            textposition='outside'
-                        ))
-                        
-                        fig_shap.update_layout(
-                            title='Contribución SHAP de cada Factor al Riesgo de Fallo',
-                            xaxis_title='Impacto en la Predicción (SHAP Value)',
-                            yaxis_title='Parámetro Operativo',
-                            height=600,
-                            showlegend=False,
-                            font=dict(size=12)
-                        )
-                        fig_shap.add_vline(x=0, line_width=2, line_color='black', line_dash='dash')
-                        
-                        st.plotly_chart(fig_shap, use_container_width=True)
-                    
-                        # Mostrar tabla detallada con TODAS las variables
-                        st.markdown('#### Detalle de Contribuciones')
-                        st.caption('Nota: Si una variable aparece con contribución 0 puede ser porque el modelo no usa esa característica o está codificada/agrupada en otras (p. ej. one-hot).')
-                        for i, (feat, val) in enumerate(contrib, 1):
-                            is_zero = abs(float(val)) < 1e-12
-                            clazz = 'shap-risk' if (val > 0 and not is_zero) else ('shap-safe' if (val <= 0 and not is_zero) else '')
-                            direction = ('AUMENTA' if val > 0 else 'REDUCE') if not is_zero else '—'
-                            suffix = ' <span style="color:#616161;">(no usada por el modelo)</span>' if is_zero else ''
-                            st.markdown(
-                                f"<div class='shap-row {clazz}'>"
-                                f"<strong>{i}. {feat}{suffix}</strong>: {val:+.4f} → {direction} el riesgo"
-                                f"</div>", 
-                                unsafe_allow_html=True
-                            )
-                    
-                    st.markdown('---')
-                    st.markdown("""
-                    ### Interpretación y Acciones Recomendadas
-                    
-                    **Cómo usar esta información:**
-                    1. **Identifique factores rojos (positivos)**: Son los que más contribuyen al riesgo
-                    2. **Priorice ajustes**: Enfóquese en reducir/modificar los parámetros con mayor impacto positivo
-                    3. **Mantenga factores verdes**: Los valores negativos están ayudando a reducir el riesgo
-                    4. **Combine con recomendaciones**: Use las sugerencias de la pestaña "Predicción"
-                    
-                    **Nota técnica:** Los valores SHAP suman al valor base del modelo para obtener la predicción final.
-                    """)
-
     with tab_hist:
         st.subheader('Histórico de Riesgo y Parámetros Operativos')
         log_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'predicciones.csv')
@@ -992,8 +1344,8 @@ def main():
             try:
                 hist = pd.read_csv(log_path, engine='python', on_bad_lines='warn')
                 if not hist.empty:
-                    # Parse timestamps with tolerance to mixed formats and timezones
-                    # Parse timestamps robustly across mixed formats using dateutil for highest tolerance
+                    # Parsear timestamps con tolerancia a formatos mixtos y zonas horarias
+                    # Uso de dateutil para mayor robustez en el parseo
                     import dateutil.parser as dp
                     def _safe_parse(x):
                         try:
@@ -1001,7 +1353,7 @@ def main():
                         except Exception:
                             return pd.NaT
                     hist['timestamp'] = hist['timestamp'].apply(_safe_parse)
-                    # Convert tz-aware to naive (drop timezone info)
+                    # Convertir timestamps con zona horaria a naive (sin tz)
                     def _drop_tz(x):
                         try:
                             if pd.notna(x) and hasattr(x, 'tz_localize'):
@@ -1033,7 +1385,7 @@ def main():
                     
                     
                     
-                    # Filtrar según rango temporal - usar Timestamp naive (sin timezone)
+                    # Filtrar según rango temporal usando Timestamp sin zona horaria
                     now = pd.Timestamp.now()
                     if time_range == 'Última hora':
                         hist_filtered = hist[hist['timestamp'] >= now - pd.Timedelta(hours=1)]
@@ -1181,8 +1533,5 @@ st.markdown("""
 .reco-high{background:#ffebee;border-left:6px solid #c62828;color:#111;}
 .reco-medium{background:#fff3cd;border-left:6px solid #ff8f00;color:#111;}
 .reco-low{background:#e8f5e9;border-left:6px solid #2e7d32;color:#111;}
-.shap-row{padding:4px 8px;margin:3px;border-radius:4px;font-size:13px;line-height:1.2;}
-.shap-risk{background:#ffebee;border-left:6px solid #d32f2f;color:#222;}
-.shap-safe{background:#e8f5e9;border-left:6px solid #2e7d32;color:#222;}
 </style>
 """, unsafe_allow_html=True)

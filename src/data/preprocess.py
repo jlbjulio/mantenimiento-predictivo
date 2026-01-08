@@ -12,15 +12,12 @@ MULTILABEL_COLS = ['twf','hdf','pwf','osf','rnf']
 
 
 def build_preprocessor(df: pd.DataFrame) -> ColumnTransformer:
-    # Exclude technical fields that shouldn't be used as features
-    excluded_cat = ['product_id']
-    excluded_num = ['uid']
-    # Whitelist canonical features only to avoid including log/metadata columns
     CANONICAL_NUMERIC = [
         'air_temp_k', 'process_temp_k', 'rot_speed_rpm', 'torque_nm', 'tool_wear_min',
         'delta_temp_k', 'omega_rad_s', 'power_w', 'wear_pct'
     ]
     CANONICAL_CAT = ['type']
+    
     numeric_cols = [c for c in CANONICAL_NUMERIC if c in df.columns]
     cat_cols = [c for c in CANONICAL_CAT if c in df.columns]
 
@@ -28,6 +25,7 @@ def build_preprocessor(df: pd.DataFrame) -> ColumnTransformer:
         ('imputer', SimpleImputer(strategy='median')),
         ('scaler', StandardScaler())
     ])
+    
     categorical_transformer = Pipeline(steps=[
         ('imputer', SimpleImputer(strategy='most_frequent')),
         ('onehot', OneHotEncoder(handle_unknown='ignore'))
@@ -38,6 +36,7 @@ def build_preprocessor(df: pd.DataFrame) -> ColumnTransformer:
             ('num', numeric_transformer, numeric_cols),
             ('cat', categorical_transformer, cat_cols)
         ])
+    
     return preprocessor
 
 

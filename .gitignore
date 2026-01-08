@@ -27,9 +27,6 @@ wheels/
 # Streamlit
 .streamlit/secrets.toml
 
-# Logs
-logs/*.csv
-
 # Data adicional (opcional - descomentar si no quieres subir feedback)
 # data/additional/
 

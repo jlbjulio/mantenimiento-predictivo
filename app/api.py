@@ -7,7 +7,6 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from src.data.data_loader import engineer_features, load_dataset
-from src.ml.recommendation import generate_recommendations
 
 MODELS_DIR = os.path.join(ROOT_DIR, 'models')
 MODEL_PATH = os.path.join(MODELS_DIR, 'failure_binary_model.joblib')
@@ -15,6 +14,7 @@ MULTI_PATH = os.path.join(MODELS_DIR, 'failure_multilabel_models.joblib')
 
 app = FastAPI(title="API Mantenimiento Predictivo", version="1.1")
 model = joblib.load(MODEL_PATH)
+# Modelos multilabel se exponen solo vía endpoint /predict_modes; la UI Streamlit no los usa
 multi_models = joblib.load(MULTI_PATH) if os.path.exists(MULTI_PATH) else None
 
 class PredictRequest(BaseModel):
@@ -49,8 +49,7 @@ def predict(req: PredictRequest):
     row = row[feature_cols]
     prob = model.predict_proba(row)[0][1]
     pred = int(model.predict(row)[0])
-    recs = generate_recommendations(data, prob, shap_contrib=None)
-    return {"prediction": pred, "probability": prob, "recommendations": recs}
+    return {"prediction": pred, "probability": prob}
 
 @app.post('/predict_modes')
 def predict_modes(req: PredictRequest):
@@ -81,5 +80,4 @@ def predict_modes(req: PredictRequest):
         global_prob = float(model.predict_proba(row)[0][1])
     except Exception:
         global_prob = None
-    recs = generate_recommendations(data, global_prob if global_prob is not None else 0.0, shap_contrib=None)
-    return {"global_probability": global_prob, "mode_probabilities": probs, "recommendations": recs}
+    return {"global_probability": global_prob, "mode_probabilities": probs}
