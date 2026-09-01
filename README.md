@@ -6,7 +6,7 @@
 
 The system integrates an advanced multilabel diagnostic engine, intelligent probability calibration, and a causal recommendation engine based on real operating parameters to reduce unplanned downtime, optimize operational costs, and increase machine availability.
 
-https://newautomatas.streamlit.app/
+
 
 ## Features
 
