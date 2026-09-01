@@ -224,16 +224,6 @@ streamlit run app/streamlit_app.py
 - CSV integrity is protected against data corruption through newline handling
 - All predictions are timestamped for full auditability
 
-## Possible Improvements
-
-- Add additional failure modes beyond the current 5 types
-- Integrate with IoT sensors for automated parameter reading
-- Export results to PDF or detailed reports
-- Enhance UI with advanced visualization libraries
-- Implement distributed training for larger datasets
-- Add predictive maintenance scheduling optimization
-- Create mobile app for remote monitoring
-
 ## Dataset Citation
 
 "Explainable Artificial Intelligence for Predictive Maintenance Applications"  
